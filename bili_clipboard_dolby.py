@@ -373,8 +373,7 @@ class _FastResponse:
         return self._data
 
     def raise_for_status(self):
-        if self._data.get("code", 0) != 0:
-            raise RuntimeError(f"API 错误: code={self._data.get('code')} msg={self._data.get('message', '')}")
+        pass  # API 错误码由各调用方自行判断
 
 
 def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None) -> dict:
@@ -454,8 +453,6 @@ def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None) ->
         body = decoded
 
     result = _json.loads(body)
-    if sessdata and result.get("code") != 0:
-        raise RuntimeError(f"B站 API 返回错误: code={result.get('code')}")
     return result
 
 
@@ -897,7 +894,7 @@ def main():
             time.sleep(0.5)
             continue
 
-        # ---- 番剧/电影 (EP/SS) ----
+        # ---- 番剧/电影 (EP/SS/MD) ----
         m = EP_RE.search(text)
         if m:
             ep_id = m.group(1)
@@ -907,6 +904,34 @@ def main():
                 print(f"\n>> 检测到番剧/电影 EP: {ep_id}", flush=True)
                 try:
                     bvid, cid, full_title = resolve_episode(session, int(ep_id))
+                    print(f"  [+] {full_title} (BV={bvid})", flush=True)
+                    data = get_playurl(session, bvid, cid, img_key, sub_key)
+                    dash = data.get("dash")
+                    if not dash:
+                        print("  [!] 未返回 DASH 数据，跳过。", flush=True)
+                    else:
+                        video_url, audio_url, vdesc, adesc = pick_dolby_streams(dash)
+                        if video_url:
+                            print(f"  [+] 画质: {vdesc}", flush=True)
+                            print(f"  [+] 音轨: {adesc if audio_url else '无'}", flush=True)
+                            launch_player(player_path, video_url, full_title, audio_url=audio_url, sessdata=sessdata)
+                        else:
+                            print("  [!] 未能提取可播放的视频流。", flush=True)
+                except Exception as e:
+                    print(f"  [!] 播放失败: {e}", flush=True)
+            time.sleep(0.5)
+            continue
+
+        # ---- 番剧/剧集 (SS) ----
+        m = SS_RE.search(text)
+        if m:
+            ss_id = m.group(1)
+            vid_key = f"ss{ss_id}"
+            if vid_key != last_vid:
+                last_vid = vid_key
+                print(f"\n>> 检测到番剧 SS: {ss_id}", flush=True)
+                try:
+                    bvid, cid, full_title = resolve_ss(session, int(ss_id))
                     print(f"  [+] {full_title} (BV={bvid})", flush=True)
                     data = get_playurl(session, bvid, cid, img_key, sub_key)
                     dash = data.get("dash")
