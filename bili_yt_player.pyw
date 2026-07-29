@@ -531,7 +531,11 @@ class App:
     def _play_yt(self, ytid):
         from bili_clipboard_dolby import launch_player
         url = f"https://www.youtube.com/watch?v={ytid}"
-        launch_player(self.player_path, url, url)
+        self._log(f"    唤起播放器: {url[:60]}...")
+        try:
+            launch_player(self.player_path, url, url)
+        except Exception as e:
+            self._log(f"    [!] YT launch 失败: {e}")
 
     def _play_ss(self, ss_id: int):
         from bili_clipboard_dolby import get_playurl, pick_dolby_streams, launch_player, resolve_ss

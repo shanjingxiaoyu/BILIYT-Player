@@ -731,6 +731,10 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None):
         proxy = find_proxy()
         if proxy:
             cmd.append(f"--http-proxy={proxy}")
+            cmd.append("--ytdl-raw-options=proxy=" + proxy)
+        else:
+            # 显式禁用代理，避免系统代理干扰 yt-dlp 连接
+            cmd.append("--no-proxy")
 
     # YouTube：Python 预处理 URL，不需要外部 yt-dlp
 
