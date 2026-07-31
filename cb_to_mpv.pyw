@@ -176,6 +176,56 @@ def _resolve_proxy() -> str:
     return _cfg_get("network", "proxy")
 
 
+def _resolve_autostart() -> bool:
+    """从 config.ini 读取开机自启设置。"""
+    return _cfg_get("app", "autostart").strip().lower() in ("true", "1", "yes")
+
+
+def _setup_autostart(enable: bool):
+    """管理 Windows 启动文件夹中的快捷方式。"""
+    import os
+    startup_dir = os.path.join(
+        os.environ.get("APPDATA", ""),
+        "Microsoft", "Windows", "Start Menu", "Programs", "Startup",
+    )
+    shortcut_path = os.path.join(startup_dir, "CB-to-MPV.lnk")
+    exe_path = str(SCRIPT_DIR / "CB-to-MPV.exe")
+
+    if enable:
+        if not os.path.isdir(startup_dir):
+            return
+        try:
+            import pythoncom
+            from win32com.client import Dispatch
+            # 需要 pywin32 — 回退到 VBS 方式
+            raise ImportError
+        except ImportError:
+            # 纯 VBS 创建快捷方式
+            vbs = (
+                f'Set WshShell = WScript.CreateObject("WScript.Shell")\n'
+                f'Set Shortcut = WshShell.CreateShortcut("{shortcut_path}")\n'
+                f'Shortcut.TargetPath = "{exe_path}"\n'
+                f'Shortcut.WorkingDirectory = "{SCRIPT_DIR}"\n'
+                f'Shortcut.Save\n'
+            )
+            vbs_path = os.path.join(os.environ.get("TEMP", "."), "_cb_to_mpv_lnk.vbs")
+            with open(vbs_path, "w", encoding="utf-8") as f:
+                f.write(vbs)
+            subprocess.run(["cscript", "//Nologo", vbs_path],
+                           capture_output=True, timeout=5)
+            try:
+                os.remove(vbs_path)
+            except OSError:
+                pass
+        print(f"[+] 开机自启已启用")
+    else:
+        try:
+            os.remove(shortcut_path)
+            print(f"[*] 开机自启已关闭")
+        except OSError:
+            pass
+
+
 # ============================================================================
 # 链接正则
 # ============================================================================
@@ -238,6 +288,13 @@ def _launch_mpv(url: str, mpv_path: str, ytdlp_path: str,
                 proxy: str):
     cmd = [mpv_path, url]
 
+    # ── 窗口 & 硬件解码 ──
+    cmd += [
+        "--force-window=yes",       # 强制创建窗口（避免 DASH 流加载时黑屏无画）
+        "--hwdec=auto-safe",        # 稳妥硬解（优先 D3D11VA，失败回退软解）
+        "--ontop",                  # 置顶窗口，不被浏览器遮挡
+    ]
+
     if mpv_confdir:
         cmd += [f"--config-dir={mpv_confdir}"]
     if ytdlp_path:
@@ -251,7 +308,8 @@ def _launch_mpv(url: str, mpv_path: str, ytdlp_path: str,
     elif browser_cookie:
         cmd.append(f"--ytdl-raw-options=cookies-from-browser={browser_cookie}")
 
-    cmd.append("--ytdl-format=bestvideo[height<=2160]+bestaudio/best")
+    # 画质：最高分辨率（2160p）+ HDR/杜比 + 最高音质
+    cmd.append("--ytdl-format=bestvideo[height<=2160]+bestaudio/bestvideo+bestaudio/best")
 
     try:
         subprocess.Popen(
@@ -301,6 +359,10 @@ def main():
     cookies_file   = _resolve_cookies()
     browser_cookie = _resolve_browser_cookie()
     proxy          = _resolve_proxy()
+    autostart      = _resolve_autostart()
+
+    # 开机自启
+    _setup_autostart(autostart)
 
     print(f"[+] mpv:      {mpv_path}")
     if ytdlp_path:
