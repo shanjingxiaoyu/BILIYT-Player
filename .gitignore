@@ -1,5 +1,9 @@
-# 敏感凭据
+# 旧版代码（归档）
+legacy/
+
+# 敏感凭据 / 用户数据
 .env
+cookies.txt
 
 # Python
 .venv/
@@ -13,13 +17,14 @@ dist/
 *.tar.gz
 *.zip
 
-# 发布包
+# 测试/发布目录
+dist_portable/
+dist_local/
+desktop_build/
 release/
-BiliYTPlayer_release/
-BiliYTPlayer_release.*
-_release_pkg/
+_release_*/
 
-# 便携播放器（��过 Releases 分发，但配置文件属源码）
+# 便携播放器（通过 Releases 分发，但配置文件属源码）
 mpv-portable/*
 !mpv-portable/portable_config/
 !mpv-portable/portable_config/*
@@ -32,16 +37,8 @@ mpv-portable/portable_config/watch_later/
 .idea/
 
 # 临时文件
-_d/
-_tmp/
-_out/
-_w/
-_w1/
-_d1/
-_*/
-gui_preview.html
 _*.py
 
-# PyInstaller spec（保留主 spec）
+# PyInstaller spec（保留新版 spec）
 *.spec
-!bili_yt_player.spec
+!cb_to_mpv.spec
