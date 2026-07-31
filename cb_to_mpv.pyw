@@ -46,7 +46,7 @@ _cfg = configparser.ConfigParser()
 def _load_config():
     """加载 config.ini（可选��。"""
     if CONFIG_PATH.is_file():
-        _cfg.read(CONFIG_PATH, encoding="utf-8")
+        _cfg.read(CONFIG_PATH, encoding="utf-8-sig")
 
 _load_config()
 
@@ -155,7 +155,7 @@ def _resolve_cookies() -> str:
         return ""  # 空白文件不传入 mpv
 
     # 检查是否只有注释（用户还没填入真实 Cookie）
-    content = p.read_text(encoding="utf-8").strip()
+    content = p.read_text(encoding="utf-8-sig").strip()
     if not content or content.startswith("#"):
         return ""
 
