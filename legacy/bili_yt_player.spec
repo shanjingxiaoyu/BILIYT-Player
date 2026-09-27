@@ -12,10 +12,16 @@ _block_cipher = None
 # ---- 需要额外加入的隐藏导入 ----
 # 这些模块 PyInstaller 静态分析可能遗漏
 _hidden_imports = [
-    # 跨文件动态导入（bili_yt_player.pyw 内部 import bili_clipboard_dolby）
+    # 跨文件动态导入（bili_yt_player.pyw / bili_clipboard_dolby.py 内部延迟 import）
     "bili_clipboard_dolby",
+    # SponsorBlock 广告跳过（在 launch_player 与 GUI 中延迟导入，
+    # 静态分析看不到，必须显式声明，否则打包后跳过功能静默失效）
+    "sponsorblock",
+    # 受管 OSC 补丁器（同上）
+    "mpv_osc",
     # tkinter 延迟导入
     "tkinter.filedialog",
+    "tkinter.messagebox",
     # pyperclip 平台后端
     "pyperclip",
     # requests 底层依赖
@@ -27,9 +33,14 @@ _hidden_imports = [
 
 # ---- 需要随 exe 一起打包的数据文件 ----
 # (源路径, 目标目录名)
+# 注意：bsponsor.lua / osc_managed.lua 都是运行时生成的，无需打包；
+#       但 osc_base.lua 是打补丁的基线，必须随包分发，否则彩色进度条不可用。
 _add_datas = [
-    # 确保 bili_clipboard_dolby.py 在导入路径中
+    # 确保模块与基线数据在导入路径中
     ("bili_clipboard_dolby.py", "."),
+    ("sponsorblock.py", "."),
+    ("mpv_osc.py", "."),
+    ("osc_base.lua", "."),
 ]
 
 a = Analysis(

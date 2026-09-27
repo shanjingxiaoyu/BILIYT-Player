@@ -5,8 +5,11 @@
 视频和音频的实际解码、渲染、色彩映射（Tone-mapping）以及硬件加速等核心播放任务，**全部交由内置的 `mpv` (位于 `mpv-portable/mpv.exe`) 负责**。
 
 ### 架构分层
-- **`bili_yt_player.pyw`** — GUI 入口（tkinter），剪贴板监听线程 + 工作线程（生产者-消费者架构）
+- **`bili_yt_player.pyw`** — GUI 入口（tkinter），剪贴板监听线程 + 工作线程（生产者-消费者架构）；含「跳过设置」窗口与可双击重播的播放历史
 - **`bili_clipboard_dolby.py`** — 后端核心：B站 API 鉴权 / WBI 签名 / DASH 流提取 / mpv 启动参数构造
+- **`sponsorblock.py`** — 广告跳过：片段查询 / 分类档位过滤 / 载荷构造 / 内嵌 Lua 跳过脚本
+- **`mpv_osc.py`** — 受管 OSC：给 mpv 的 osc.lua 打补丁（进度条彩色区间 + 去广告时长），失败则回退内置 OSC
+- **`osc_base.lua`** — 随项目分发的基线 osc.lua（取自 mpv v0.41.0-244-gaf9c81fa1，LGPLv2.1+）
 - **`mpv-portable/mpv.exe`** — 播放器，所有画面渲染、音频输出、色彩映射在此完成
 - **`mpv-portable/yt-dlp.exe`** — YouTube URL 解析，由 mpv 的 `ytdl_hook` 内置脚本调用
 - **`mpv-portable/portable_config/mpv.conf`** — mpv 渲染 / 同步 / 缓冲 / HDR 映射配置
@@ -18,6 +21,19 @@
     *   **画面与渲染参数**：修改 `mpv-portable/portable_config/mpv.conf`。例如：HDR/SDR 的色调映射 (`tone-mapping`)、渲染器选择 (`vo=gpu-next`)、硬件解码 (`hwdec`)、视频同步模式 (`video-sync`)。
     *   **快捷键与交互**：修改 `mpv-portable/portable_config/input.conf`。例如：自定义按键来调节亮度 (`brightness`)、音量、对比度等。
 *   **Python 的唯一职责**：如果必须在启动时动态传递参数给 mpv，只能修改 `bili_clipboard_dolby.py` 中的 `launch_player` 函数，通过 `cmd` 列表传递 CLI 参数（例如 `--brightness=15`）。命令行参数会覆盖 mpv.conf 中的同名选项。
+
+### 2.1 广告跳过（BilibiliSponsorBlock）职责边界
+*   **查询归 Python**：`legacy/sponsorblock.py` 负责请求 `bsbsb.top` API、过滤分类、构造载荷。mpv 的 Lua 环境**没有** HTTP 客户端（`mp` 表无 socket API），因此网络请求不可能、也不允许放到 Lua 侧。
+*   **执行归 mpv**：跳过的实际动作（`seek`）必须由 mpv 的 Lua 脚本完成。**禁止**在 Python 中实现 seek / 轮询播放进度 / 模拟按键。
+*   **显示归受管 OSC**：进度条彩色区间与「去广告时长」由 `legacy/mpv_osc.py` 给 mpv 的 `osc.lua` 打补丁实现，落盘为 `%APPDATA%\BiliYTPlayer\osc_managed.lua`，配合 `--osc=no` 使用（否则内置 OSC 与受管 OSC 会同时渲染）。
+*   **脚本是内嵌常量**：两个 Lua（`SKIP_SCRIPT_LUA`、补丁后的 OSC）都是内嵌常量，运行时落盘。不要把它们挪进 `mpv-portable/`（该目录被 .gitignore 排除、随发行包分发，且 `scripts/` 自动加载会与 `--script` 重复加载）。
+*   **载荷走环境变量**：JSON 载荷经 `BSPONSOR_PAYLOAD` 传给 mpv。**不要改用 `--script-opts`**：该选项用逗号分隔键值，而 JSON 必然含逗号，会被静默截断。
+*   **必须过滤 `actionType`**：只有 `skip` / `mute` 可执行。`full` 是整片推广标签（`segment=[0,0]`），不过滤会导致播放跳到 0 秒；`poi` 是高光跳转，非广告。
+*   **失败必须降级**：任何网络/解析异常都返回空列表并继续正常播放；OSC 补丁失败则回退 mpv 内置 OSC。广告跳过绝不能成为播放失败的原因。
+*   **交互顺序：先跳过、再提示**：进入 auto 片段立即 seek，随后弹出提示并在 `undo_seconds` 内可按 Enter 撤销。撤销后该片段本次不再自动跳过。不要改成「先倒计时再跳」。
+*   **撤销键必须用 `add_forced_key_binding`**：实测 mpv 的 `keypress` 只派发 `input.conf` 里的绑定，`add_key_binding(nil, name, ...)` 需用户手动配置才生效；只有 forced 绑定会无条件覆盖（含内置 `ENTER=playlist-next`）。
+*   **Lua 改动必须过 mpv 实测**：两个已知陷阱 —— ①JSON 字段 `end` 与 Lua 保留字冲突，必须写 `s["end"]`；②`assdraw.new_event()` 只写一个换行，而 ASS 中换行即新事件行、**不继承 `\pos`**，因此每个色块必须用独立 ass 对象自带 `\pos`/`\an` 再 `merge`（否则图形会跑到窗口左上角）。纯文本断言抓不到这两类问题，`legacy/tests/` 里会用真实 mpv 加载校验，改 Lua 后务必跑测试。
+
 
 ## 3. 网络请求与并发原则
 *   **剪贴板监听线程必须非阻塞**：监听线程只做剪贴板读取 + 正则匹配，检测到新链接入队 (`queue.Queue`)，不做任何网络请求。网络请求由独立的 Worker 线程消费。
