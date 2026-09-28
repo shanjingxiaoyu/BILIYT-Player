@@ -512,7 +512,7 @@ class TestConfig(unittest.TestCase):
             cfg = dm.load_config(Path(d))
             self.assertTrue((Path(d) / "danmaku.conf").exists())
             self.assertTrue(cfg["enabled"])
-            self.assertEqual(cfg["display_region"], 0.55)
+            self.assertEqual(cfg["display_region"], 0.80)
             self.assertEqual(cfg["duration_marquee"], 12.0)
             self.assertEqual(cfg["font_size_ratio"], 0.05)
             self.assertTrue(cfg["scale_xml_size"])

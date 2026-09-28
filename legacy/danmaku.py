@@ -74,7 +74,7 @@ DEFAULT_CONFIG = {
     "font_size_ratio": 0.05,   # 相对视频高度（1080p 下约 54px，观感接近 B 站默认）
     "duration_marquee": 12.0,  # 滚动弹幕存活秒数
     "duration_still": 5.0,     # 固定弹幕存活秒数
-    "display_region": 0.55,    # 占用画面上方比例（下方留给字幕与 OSC）
+    "display_region": 0.80,    # 占用画面上方比例（下方留给字幕与 OSC）
     "block_top": False,        # 屏蔽顶部固定弹幕
     "block_bottom": False,     # 屏蔽底部固定弹幕
     "block_scroll": False,     # 屏蔽滚动弹幕
@@ -113,7 +113,7 @@ duration_still = 5.0
 
 # 弹幕占用画面上方比例，下方留白给字幕与进度条
 # 注意：该值过小会显著减少可用轨道数，导致大量弹幕被丢弃（0.3 以下尤其明显）
-display_region = 0.55
+display_region = 0.80
 
 # 屏蔽某类弹幕
 block_top = false
@@ -625,7 +625,7 @@ def ensure_ass(cid, width: int, height: int, *, config_dir: Path, cfg: dict = No
         try:
             fs = max(12, int(int(height) * float(cfg.get("font_size_ratio", 0.05))))
             lane_h = max(1, int(fs * 1.2))
-            n_lanes = max(1, int(int(height) * float(cfg.get("display_region", 0.55))) // lane_h)
+            n_lanes = max(1, int(int(height) * float(cfg.get("display_region", 0.80))) // lane_h)
             emitted = count_events(ass)
             if n_lanes < 4 or (items and emitted < len(items) * 0.6):
                 log(f"    [!] 弹幕轨道偏少（{n_lanes} 条），"

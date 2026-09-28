@@ -24,7 +24,7 @@ duration_still = 5.0
 
 # 弹幕占用画面上方比例，下方留白给字幕与进度条
 # 注意：该值过小会显著减少可用轨道数，导致大量弹幕被丢弃（0.3 以下尤其明显）
-display_region = 0.55
+display_region = 0.80
 
 # 屏蔽某类弹幕
 block_top = false

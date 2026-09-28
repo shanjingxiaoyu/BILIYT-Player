@@ -508,7 +508,7 @@ class App:
         fontsize_var = tk.StringVar(value=str(cfg.get("font_size_ratio", 0.05)))
         marquee_var = tk.StringVar(value=str(cfg.get("duration_marquee", 12.0)))
         still_var = tk.StringVar(value=str(cfg.get("duration_still", 5.0)))
-        region_var = tk.StringVar(value=str(cfg.get("display_region", 0.55)))
+        region_var = tk.StringVar(value=str(cfg.get("display_region", 0.80)))
         outline_var = tk.StringVar(value=str(cfg.get("outline", 2.0)))
         face_var = tk.StringVar(value=str(cfg.get("font_face", "Microsoft YaHei")))
         kw_var = tk.StringVar(value=str(cfg.get("block_keywords", "")))
@@ -553,7 +553,7 @@ class App:
             new["duration_marquee"] = max(2.0, min(30.0, _num(marquee_var, 12.0)))
             new["duration_still"] = max(1.0, min(20.0, _num(still_var, 5.0)))
             # 显示区域至少 0.3，否则轨道太少会导致大量弹幕被丢弃
-            new["display_region"] = max(0.3, min(1.0, _num(region_var, 0.55)))
+            new["display_region"] = max(0.3, min(1.0, _num(region_var, 0.80)))
             new["outline"] = max(0.0, min(6.0, _num(outline_var, 2.0)))
             new["font_face"] = face_var.get().strip() or "Microsoft YaHei"
             new["block_keywords"] = kw_var.get().strip()
