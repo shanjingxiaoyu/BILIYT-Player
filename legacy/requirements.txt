@@ -1,6 +1,15 @@
+# -*- coding: utf-8 -*-
+# 上面这行是**必需的**，不要删除。
+# 原因：pip 读取本文件时会用 locale 编码（中文 Windows 上是 cp936/GBK）来解码，
+# 而本文件是 UTF-8。没有该声明时 pip 会在解析中文注释时抛
+# UnicodeDecodeError: 'gbk' codec can't decode byte 0xba ...
+# 从而整个依赖安装失败（build_exe.bat 会报 "Failed to install dependencies"）。
+# 带 coding 声明后 pip 会按 UTF-8 解码。若改动本文件，请保持第一行不变。
+
 requests>=2.28
 python-dotenv>=1.0
 pyperclip>=1.8
 yt-dlp>=2024.0
+
 # ---- 打包为 EXE（可选） ----
 # pyinstaller>=6.0

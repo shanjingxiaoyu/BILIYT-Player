@@ -1,0 +1,36 @@
+# ==============================================================================
+# BiliYTPlayer — 原生字幕（CC / AI 字幕）配置 【参考副本】
+#
+# 播放器实际读取的是（缺失时自动生成）：
+#   %APPDATA%\BiliYTPlayer\subtitle.conf
+# 建议用 GUI 的「字幕设置…」按钮修改。改完后播放下一个视频即生效。
+#
+# 注意：本文件只管 api.bilibili.com 提供的字幕；
+#       UP 主压制在画面里的硬字幕无法通过任何配置调整。
+# ==============================================================================
+
+enabled = true
+
+# 字体与字号（字号 = 视频高度 × 该比例）
+font_face = Microsoft YaHei
+font_size_ratio = 0.045
+
+# 文字颜色 / 底框颜色（#RRGGBB）
+color = #FFFFFF
+back_color = #000000
+
+# 不透明度 0..1
+opacity = 1.0
+
+# 边框样式：box = 不透明底框（推荐，任何画面都清晰）；outline = 描边
+border_style = box
+outline = 2.0
+
+# 对齐位置（九宫格）：bottom-center 为底部居中
+# 可选：bottom-left / bottom-center / bottom-right
+#       middle-left / middle-center / middle-right
+#       top-left / top-center / top-right
+alignment = bottom-center
+
+# 距对应边的距离 = 视频高度 × 该比例（0.06 ≈ 6%）
+position_ratio = 0.06

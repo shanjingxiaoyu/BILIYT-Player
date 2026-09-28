@@ -221,6 +221,12 @@ def find_player():
     if bundled.is_file():
         return str(bundled)
 
+    # ---- 0b. 从源码运行时 mpv-portable/ 位于仓库根目录（legacy/ 的上一级） ----
+    if not getattr(sys, "frozen", False):
+        repo_bundled = _exe_dir.parent / "mpv-portable" / "mpv.exe"
+        if repo_bundled.is_file():
+            return str(repo_bundled)
+
     # ---- 1. 独立安装的 mpv（最新稳定版） ----
     # winget 安装路径
     standalone_mpv_paths = [
@@ -776,10 +782,45 @@ def _resolve_proxy_url(emit=None) -> tuple[str | None, str | None]:
     return raw_proxy, raw_proxy
 
 
-def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, log=None):
+def resolve_config_dir(player_path=None) -> Path:
+    """定位 mpv 的便携配置目录（portable_config）。
+
+    优先级（取第一个真实存在的目录）：
+      1. 播放器同级的 portable_config        —— 发行包 / 独立安装的 mpv 最准确的答案
+      2. <_exe_dir>/mpv-portable/portable_config —— 传统布局，保持向后兼容
+      3. <_exe_dir>/portable_config
+      4. 兜底返回传统布局表达式（即使不存在，行为与修改前一致）
+
+    背景：从源码运行时 _exe_dir 指向 legacy/，而 mpv-portable/ 实际位于仓库根目录，
+    旧实现会得到不存在的路径，导致 --config-dir 失效（HDR 映射等配置全部不生效）。
+    """
+    candidates = []
+    if player_path:
+        try:
+            candidates.append(Path(player_path).resolve().parent / "portable_config")
+        except OSError:
+            pass
+    candidates.append(_exe_dir / "mpv-portable" / "portable_config")
+    candidates.append(_exe_dir / "portable_config")
+
+    for cand in candidates:
+        try:
+            if cand.is_dir():
+                return cand
+        except OSError:
+            continue
+    return candidates[1]
+
+
+def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, log=None,
+                  segments=None, sponsor_cfg=None, danmaku_ass=None, subtitle_file=None):
     """唤起 mpv 播放。B 站（有 sessdata）走 CDN 直链 + cookie；YouTube（无 sessdata）走 ytdl_hook + 代理。
 
     log: 可选回调函数，用于把状态/错误信息传给 GUI（避免 print 在 --windowed 模式下被吞）。
+    segments: 可选，SponsorBlock 片段列表（已过滤）。非空时注入跳过脚本，自动跳过广告。
+    sponsor_cfg: 可选，SponsorBlock 配置字典（behavior/notify/debug/server 等）。
+    danmaku_ass: 可选，弹幕 ASS 路径（主字幕轨）。
+    subtitle_file: 可选，原生字幕 ASS 路径（次字幕轨，与弹幕并存）。
     """
     import tempfile
 
@@ -791,7 +832,8 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
                 pass
         print(msg, flush=True)
 
-    portable_conf = str(_exe_dir / "mpv-portable" / "portable_config")
+    portable_conf = str(resolve_config_dir(player_path))
+    launch_env = None  # 仅在注入 SponsorBlock 载荷时非 None
 
     # ── 公共参数 ──────────────────────────────────────────────────────────
     cmd = [
@@ -824,9 +866,91 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
                 "--demuxer-lavf-probescore=100",
             ]
 
+        # ── 弹幕与字幕：外挂 ASS ──────────────────────────────────────────
+        # 两条轨道的加载方式（已实测）：
+        #   mpv **没有** --secondary-sub-file 这个选项（本机 v0.41 实测不存在）。
+        #   正确做法是重复传 --sub-file 生成多个字幕轨（1、2…），
+        #   再用 --secondary-sid=N 指定第 N 轨为次要轨；主次两轨可同时显示。
+        # ASS 自带 PlayRes，mpv 会按其分辨率自动缩放。
+        dm_ok = bool(danmaku_ass) and os.path.isfile(str(danmaku_ass))
+        cc_ok = bool(subtitle_file) and os.path.isfile(str(subtitle_file))
+
+        if dm_ok and cc_ok:
+            # 弹幕 = 轨 1（主），原生字幕 = 轨 2（次）
+            # 关键：mpv 的 secondary-sub-ass-override 默认是 **strip**，
+            # 会把次轨的 ASS 样式（位置/字号/颜色）整段丢弃 —— 实测表现为字幕
+            # 变回默认小号白字并跑到画面顶部。必须显式设为 no 才能保留样式。
+            # （--sub-ass-override=no 只作用于主轨，管不到次轨。）
+            cmd += [
+                "--sub-file=" + str(danmaku_ass),
+                "--sub-file=" + str(subtitle_file),
+                "--sid=1",
+                "--secondary-sid=2",
+                "--sub-ass=yes",
+                "--sub-ass-override=no",
+                "--secondary-sub-ass-override=no",
+                "--sub-visibility=yes",
+                "--secondary-sub-visibility=yes",
+            ]
+            _emit(f"    [+] 弹幕已加载: {Path(danmaku_ass).name}（主轨）")
+            _emit(f"    [+] 字幕已加载: {Path(subtitle_file).name}（次轨）")
+        elif dm_ok:
+            cmd += ["--sub-file=" + str(danmaku_ass), "--sub-ass=yes",
+                    "--sub-ass-override=no", "--sub-visibility=yes"]
+            _emit(f"    [+] 弹幕已加载: {Path(danmaku_ass).name}")
+        elif cc_ok:
+            # 单独放字幕时走主轨；位置由 ASS 的 an/MarginV 决定
+            cmd += ["--sub-file=" + str(subtitle_file), "--sub-ass=yes",
+                    "--sub-ass-override=no", "--sub-visibility=yes"]
+            _emit(f"    [+] 字幕已加载: {Path(subtitle_file).name}")
+
+        # ── SponsorBlock：注入跳过脚本 + 彩色进度条 OSC ───────────────────
+        # 注意：--load-scripts=no 只禁用 scripts/ 目录自动加载，不影响显式 --script，
+        # 因此这里追加脚本不会拖慢启动，也不会与自动加载重复执行。
+        # 载荷走环境变量而非 --script-opts：后者以逗号分隔，会截断 JSON。
+        if segments:
+            try:
+                import sponsorblock as _sb
+
+                launch_env = dict(os.environ)
+                launch_env[_sb.PAYLOAD_ENV] = _sb.build_payload(
+                    sponsor_cfg.get("bvid", "") if sponsor_cfg else "",
+                    sponsor_cfg.get("cid", "") if sponsor_cfg else "",
+                    segments,
+                    sponsor_cfg or {},
+                    title=title,
+                )
+
+                # 1) 跳过脚本（执行 seek）
+                lua_path = _sb.ensure_lua_script(_CONFIG_DIR)
+                if lua_path.exists():
+                    cmd += ["--script=" + str(lua_path)]
+                else:
+                    _emit("    [!] SponsorBlock 跳过脚本写入失败")
+
+                # 2) 受管 OSC（彩色进度条 + 去广告时长）
+                #    必须配合 --osc=no：否则内置 OSC 与受管 OSC 会同时加载
+                #    （实测两者会各自渲染，脚本名变成 osc2，视觉上重叠）。
+                if sponsor_cfg and sponsor_cfg.get("managed_osc", True):
+                    import mpv_osc as _osc
+
+                    osc_path, osc_status = _osc.ensure_managed_osc(_CONFIG_DIR, log=_emit)
+                    if osc_path:
+                        cmd += ["--osc=no", "--script=" + str(osc_path)]
+                    else:
+                        # 打补丁失败 -> 保留 mpv 内置 OSC，功能降级但不影响播放
+                        _emit("    [*] 彩色进度条不可用，使用 mpv 内置 OSC")
+
+                _emit(f"    [+] 广告跳过: 已注入 {len(segments)} 个片段")
+            except Exception as e:
+                _emit(f"    [!] SponsorBlock 注入失败（已忽略）: {e}")
+
     # ── YouTube：ytdl_hook 解析 + 走系统代理 ──────────────────────────────
     else:
-        ytdlp_exe = str(_exe_dir / "mpv-portable" / "yt-dlp.exe")
+        # yt-dlp 与 mpv 同目录（发行包布局），回退到传统 mpv-portable/ 布局
+        ytdlp_exe = str(Path(player_path).resolve().parent / "yt-dlp.exe")
+        if not os.path.isfile(ytdlp_exe):
+            ytdlp_exe = str(_exe_dir / "mpv-portable" / "yt-dlp.exe")
         if not os.path.isfile(ytdlp_exe):
             _emit(f"    [!] 未找到 yt-dlp.exe: {ytdlp_exe}")
             _emit(f"        请从 https://github.com/yt-dlp/yt-dlp/releases 下载 yt-dlp.exe")
@@ -856,6 +980,9 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
     popen_kw = {}
     if sys.platform == "win32":
         popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+    if launch_env is not None:
+        # SponsorBlock 载荷经环境变量传给 mpv 的 Lua 脚本
+        popen_kw["env"] = launch_env
     proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, **popen_kw)
 
     # cookie 文件由 atexit 自动清理，无需阻塞等待
