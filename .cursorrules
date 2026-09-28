@@ -8,6 +8,8 @@
 - **`bili_yt_player.pyw`** — GUI 入口（tkinter），剪贴板监听线程 + 工作线程（生产者-消费者架构）；含「跳过设置」窗口与可双击重播的播放历史
 - **`bili_clipboard_dolby.py`** — 后端核心：B站 API 鉴权 / WBI 签名 / DASH 流提取 / mpv 启动参数构造
 - **`sponsorblock.py`** — 广告跳过：片段查询 / 分类档位过滤 / 载荷构造 / 内嵌 Lua 跳过脚本
+- **`danmaku.py`** — 弹幕：公开端点下载 / deflate 解压 / XML 解析 / ASS 转换（含轨道分配与缓存）
+- **`subtitle.py`** — 原生字幕（CC / AI 字幕）：查询 / 下载 / ASS 转换，走次字幕轨与弹幕并存
 - **`mpv_osc.py`** — 受管 OSC：给 mpv 的 osc.lua 打补丁（进度条彩色区间 + 去广告时长），失败则回退内置 OSC
 - **`osc_base.lua`** — 随项目分发的基线 osc.lua（取自 mpv v0.41.0-244-gaf9c81fa1，LGPLv2.1+）
 - **`mpv-portable/mpv.exe`** — 播放器，所有画面渲染、音频输出、色彩映射在此完成
@@ -34,6 +36,21 @@
 *   **撤销键必须用 `add_forced_key_binding`**：实测 mpv 的 `keypress` 只派发 `input.conf` 里的绑定，`add_key_binding(nil, name, ...)` 需用户手动配置才生效；只有 forced 绑定会无条件覆盖（含内置 `ENTER=playlist-next`）。
 *   **Lua 改动必须过 mpv 实测**：两个已知陷阱 —— ①JSON 字段 `end` 与 Lua 保留字冲突，必须写 `s["end"]`；②`assdraw.new_event()` 只写一个换行，而 ASS 中换行即新事件行、**不继承 `\pos`**，因此每个色块必须用独立 ass 对象自带 `\pos`/`\an` 再 `merge`（否则图形会跑到窗口左上角）。纯文本断言抓不到这两类问题，`legacy/tests/` 里会用真实 mpv 加载校验，改 Lua 后务必跑测试。
 
+
+### 2.2 弹幕与字幕职责边界
+*   **弹幕不走 yt-dlp**：`legacy/danmaku.py` 直接请求公开端点 `comment.bilibili.com/<cid>.xml`（**无需鉴权**），用 stdlib 解析并转 ASS。项目本来就走 DASH 直链、手里已有 `cid`，无需 yt-dlp 参与。
+*   **不要引入 yt-dlp-danmaku / biliass**：本项目的 `yt-dlp.exe` 是冻结版，内嵌 **Python 3.10**，而 pip 装的 biliass 是 **cp311 编译扩展**（`_core.pyd`），ABI 不匹配，插件永远 import 不进去；冻结版只扫描 `%APPDATA%\yt-dlp\plugins\`，不认 `--plugin-dirs`。且 biliass 为 GPLv3。
+*   **必须解压 deflate**：弹幕响应带 `Content-Encoding: deflate`，且是**裸 deflate（无 zlib 头）**，必须 `zlib.decompress(raw, -15)`；直接 `decode('utf-8')` 会 `UnicodeDecodeError`。
+*   **必须先按时间排序**：B 站返回的 XML **不是**按时间递增的（实测首条 495s、第二条 50s）。`to_ass` 内部自行排序；若按输入顺序分配轨道，保留率会从 100% 掉到 27.8%。
+*   **轨道复用规则**：弹幕**尾部离开屏幕后轨道即可复用**（Danmaku2ASS 式）。禁止改成「轨道固定占用 N 秒」——实测那样会丢掉约 91% 的弹幕。
+*   **用重复 `--sub-file` + `--secondary-sid`**：mpv **没有** `--secondary-sub-file` 这个选项（本机 v0.41 实测不存在）。要两条字幕轨就重复传 `--sub-file`，再用 `--secondary-sid=N` 指定次轨。
+*   **次轨必须关掉 ass-override**：mpv 的 `secondary-sub-ass-override` 默认是 **`strip`**，会把次轨（原生字幕）的 ASS 样式整段丢弃 —— 实测表现为字幕变成默认小号白字并跑到画面**顶部**。必须显式 `--secondary-sub-ass-override=no`；`--sub-ass-override=no` 只作用于主轨，管不到次轨。
+*   **字幕位置按比例，不要写死像素**：ASS 的 `MarginV` 单位是 PlayRes 像素。写死 36px 在 4096x2048 上只有 1.76% 高度（几乎贴底），在 1280x720 上却是 5%。必须用 `height × position_ratio`，默认底部居中（`Alignment=2`）。
+*   **字幕与弹幕配置分开**：两者默认值不同（弹幕字号 0.025/不透明 0.8；字幕字号 0.045/不透明 1.0），必须各自一个 conf；共用会让字幕继承弹幕的小字号与半透明。
+*   **样式进缓存 key**：字幕缓存文件名含样式指纹（`font_face/font_size_ratio/opacity/color/back_color/border_style/outline/alignment/position_ratio` 的哈希）。否则用户改了位置/字号后旧缓存仍命中，设置看起来「没生效」。
+*   **像素断言要排除视频本身内容**：验证字幕/弹幕渲染时，**不能用「底部有没有白字」当判据** —— 很多视频自带硬字幕或大面积白底幻灯片。要用**不会与视频撞色的自定义颜色**（如纯黄配深蓝底），并断言该颜色的像素位置。这条是踩过的坑：曾把 UP 主压制的硬字幕误判为自己的字幕渲染成功。
+*   **底部留白**：弹幕默认只用画面上方（`display_region`），下方留给原生字幕与 SponsorBlock 的 OSC。
+*   **失败必须降级**：下载/解析/转换任何一步失败都返回 None，正常播放。弹幕绝不能成为播放失败的原因。
 
 ## 3. 网络请求与并发原则
 *   **剪贴板监听线程必须非阻塞**：监听线程只做剪贴板读取 + 正则匹配，检测到新链接入队 (`queue.Queue`)，不做任何网络请求。网络请求由独立的 Worker 线程消费。

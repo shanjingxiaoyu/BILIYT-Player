@@ -9,11 +9,15 @@
 bili_yt_player.pyw      GUI 入口（tkinter），剪贴板监听 + 工作线程（生产者-消费者）
 bili_clipboard_dolby.py 后端核心：B 站 API 鉴权 / WBI 签名 / DASH 流提取 / mpv 启动参数
 sponsorblock.py         广告跳过：片段查询 / 过滤 / 载荷构造 / 内嵌 Lua 跳过脚本
+danmaku.py              弹幕：下载 / deflate 解压 / XML 解析 / ASS 转换 / 缓存
+subtitle.py             原生字幕（CC / AI）：查询 / 下载 / ASS 转换
+mpv_osc.py              受管 OSC：给 osc.lua 打补丁（彩色进度条 + 去广告时长）
 mpv-portable/mpv.exe    播放器（所有解码、渲染、色调映射在此完成）
 mpv-portable/yt-dlp.exe YouTube URL 解析（由 mpv 内置 ytdl_hook 调用）
 config/mpv.conf         mpv 渲染 / 同步 / 缓冲 / HDR 映射配置（参考副本）
 config/input.conf       mpv 快捷键配置（参考副本）
 config/sponsorblock.conf.example  广告跳过配置（参考副本）
+config/danmaku.conf.example       弹幕配置（参考副本）
 ```
 
 播放流程：剪贴板监听线程只做读取 + 正则匹配，检测到新链接入队；工作线程消费队列，调用 B 站 API 或 yt-dlp 解析出真实流地址，启动 mpv 播放。监听线程全程非阻塞。
@@ -100,6 +104,63 @@ GUI 主窗口的 **「跳过设置…」** 按钮可逐类选择档位，并调�
 历史列表使用 `ttk.Treeview`，记录时间、来源、标题与画质/音轨，
 并额外显示本次跳过的段数与时长的概要。**双击任意条目即可重播该视频**。
 
+## 弹幕与字幕
+
+### 弹幕
+
+复制 B 站链接播放时，自动下载该视频弹幕并以**外挂 ASS** 显示（不转码、不烧录，直播流同样可用）。
+
+- **无需登录**：弹幕端点是公开接口，游客也可获取
+- **不依赖 yt-dlp**：项目本来就走 DASH 直链、手里已有 `cid`，直接用 stdlib 下载并转换
+- **保留率 100%**：轨道分配采用 Danmaku2ASS 式策略（弹幕尾部离开屏幕后轨道即可复用）。
+  朴素实现会丢掉约 91% 的弹幕
+- **彩色**：保留弹幕原始颜色；滚动/顶部/底部三种模式分别处理
+- **避让**：默认只占画面上方 85%，下方留给原生字幕与进度条
+
+### 原生字幕（CC / AI 字幕）
+
+部分视频带字幕（实测抽样的视频中约一半有 `ai-zh`）。有则自动加载到**次字幕轨**，
+与弹幕同时显示；没有则静默跳过。
+
+**默认底部居中。** 「字幕设置…」按钮可调：
+
+- **对齐位置** — 九宫格（底部/中部/顶部 × 左/中/右），默认**底部 中**
+- **距边距离比例** — 视频高度 × 该值，默认 `0.06`（约 6%）
+- **字号比例**、**字体**
+- **文字颜色 / 底框颜色**
+- **不透明度**
+- **边框样式** — 不透明底框（推荐，任何画面都清晰）或仅描边
+- **恢复默认**
+
+配置写在 `%APPDATA%\BiliYTPlayer\subtitle.conf`（首次运行自动生成，
+仓库内 [config/subtitle.conf.example](config/subtitle.conf.example) 为参考副本）。
+
+> **注意**：这里说的「字幕」是 B 站通过 API 提供的字幕。
+> UP 主**压制在画面里的硬字幕**是视频像素的一部分，任何播放器都无法调整其位置或样式。
+
+| | 弹幕 | 原生字幕 |
+|---|---|---|
+| 需要登录 | 否 | 是（复用 SESSDATA） |
+| 覆盖率 | 几乎全部视频 | 部分视频 |
+| 字幕轨 | 主轨（sid=1） | 次轨（secondary-sid=2） |
+| 默认位置 | 画面上方（留白给字幕） | 底部居中 |
+| 配置文件 | `danmaku.conf` | `subtitle.conf` |
+
+### 配置与开关
+
+主窗口有三个勾选框：**自动跳过 UP 主广告**、**显示弹幕**、**显示原生字幕**。
+**「弹幕设置…」** 可调弹幕的不透明度、字号、滚动/固定存活时长、显示区域、
+描边、字体、屏蔽关键词与屏蔽类型，并可一键清空缓存。
+**「字幕设置…」** 见上一节。
+
+也可直接编辑对应 conf 文件（首次运行自动生成，
+[config/danmaku.conf.example](config/danmaku.conf.example) 与
+[config/subtitle.conf.example](config/subtitle.conf.example) 为参考副本）。
+**改完播放下一个视频即生效。**
+
+弹幕与字幕的 ASS 缓存在 `%APPDATA%\BiliYTPlayer\cache\`，文件名含分辨率与**样式指纹**
+（改了位置/字号会自动生成新文件，不会命中旧缓存），超出上限按最久未用自动清理。
+
 ## 关键设计
 
 - **B 站直连**：裸 socket HTTPS 直连 B 站 API，避免 `requests` 库在 Windows 下的代理探测延迟
@@ -109,6 +170,11 @@ GUI 主窗口的 **「跳过设置…」** 按钮可逐类选择档位，并调�
 - **广告跳过分层**：Python 只负责「查什么」（HTTP 查询 + 过滤 + 传参），seek 全部交给 mpv 的 Lua 脚本。mpv 的 Lua 环境没有 HTTP 客户端，因此这个分工是唯一可行解
 - **载荷走环境变量**：`--script-opts` 以逗号分隔键值，而 JSON 必然含逗号会被截断，故经 `BSPONSOR_PAYLOAD` 传递
 - **受管 OSC 的锚点式补丁**：mpv 内置 OSC 只能在进度条画章节刻度线，无法按任意区间着色，因此以「代码特征锚定」给 osc.lua 打补丁。每个锚点必须在基线中唯一，否则整体放弃并回退内置 OSC —— 这样 mpv 升级不会让播放器变砖
+- **弹幕用 stdlib 自实现**：不引入 `yt-dlp-danmaku`/`biliass`。原因：本项目的 `yt-dlp.exe` 是冻结版，内嵌 Python 3.10，而 pip 装的 biliass 是 cp311 编译扩展，ABI 不匹配永远 import 不进去；且 biliass 为 GPLv3
+- **弹幕响应要解 deflate**：端点是裸 deflate（无 zlib 头），须 `zlib.decompress(raw, -15)`
+- **弹幕 XML 需自行排序**：B 站返回的顺序不是按时间的，直接按输入顺序分配轨道会把保留率压到 27.8%
+- **次字幕轨要关 ass-override**：mpv 的 `secondary-sub-ass-override` 默认为 `strip`，会把原生字幕的 ASS 样式整段丢弃（字幕变小号白字并跑到顶部）。必须显式设为 `no`
+- **字幕位置按比例**：ASS 的 `MarginV` 是 PlayRes 像素，写死会在不同分辨率下观感差异巨大；改为 `height × position_ratio`，跨分辨率一致
 
 ## 测试
 
@@ -116,14 +182,16 @@ GUI 主窗口的 **「跳过设置…」** 按钮可逐类选择档位，并调�
 python -m unittest discover -s legacy/tests -t .
 ```
 
-其中两个真实 mpv 校验不可省略：
+三处**真实 mpv 校验**不可省略（纯文本断言抓不到这些）：
 
-- `TestLuaScriptParses` — 用真实 mpv 加载跳过脚本
-- `TestPatchedOscParsesInMpv` — 用真实 mpv 加载补丁版 OSC
+- `TestLuaScriptParses` — 用真实 mpv 加载 SponsorBlock 跳过脚本
+- `TestPatchedOscParsesInMpv` / `TestColoredBarsActuallyRender` — 加载补丁版 OSC 并**断言彩色像素真的出现在进度条上**
+- `TestDanmakuRendersInMpv` — 渲染弹幕 ASS 并断言弹幕像素出现
 
-原因：`end` 是 Lua 保留字（须写 `s["end"]`），以及 `assdraw.new_event()` 产生的新 ASS
-事件行**不继承 `\pos`**（色块必须用独立 ass 对象）。这两类问题纯文本断言都抓不到，
-只有让 mpv 真正加载才会暴露。
+这些检查存在的理由都是踩过的坑：`end` 是 Lua 保留字（须写 `s["end"]`）；
+`assdraw.new_event()` 产生的 ASS 新事件行**不继承 `\pos`**（色块必须用独立 ass 对象）；
+`element.name` 在 mpv OSC 里恒为 nil（选择器须用 `element.type == "slider"`）。
+只有让 mpv 真正渲染、并对像素做断言，才会暴露这类静默失败。
 
 ## 敏感信息声明
 

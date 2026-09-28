@@ -813,12 +813,14 @@ def resolve_config_dir(player_path=None) -> Path:
 
 
 def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, log=None,
-                  segments=None, sponsor_cfg=None):
+                  segments=None, sponsor_cfg=None, danmaku_ass=None, subtitle_file=None):
     """唤起 mpv 播放。B 站（有 sessdata）走 CDN 直链 + cookie；YouTube（无 sessdata）走 ytdl_hook + 代理。
 
     log: 可选回调函数，用于把状态/错误信息传给 GUI（避免 print 在 --windowed 模式下被吞）。
     segments: 可选，SponsorBlock 片段列表（已过滤）。非空时注入跳过脚本，自动跳过广告。
     sponsor_cfg: 可选，SponsorBlock 配置字典（behavior/notify/debug/server 等）。
+    danmaku_ass: 可选，弹幕 ASS 路径（主字幕轨）。
+    subtitle_file: 可选，原生字幕 ASS 路径（次字幕轨，与弹幕并存）。
     """
     import tempfile
 
@@ -863,6 +865,44 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
                 "--audio-demuxer=lavf",
                 "--demuxer-lavf-probescore=100",
             ]
+
+        # ── 弹幕与字幕：外挂 ASS ──────────────────────────────────────────
+        # 两条轨道的加载方式（已实测）：
+        #   mpv **没有** --secondary-sub-file 这个选项（本机 v0.41 实测不存在）。
+        #   正确做法是重复传 --sub-file 生成多个字幕轨（1、2…），
+        #   再用 --secondary-sid=N 指定第 N 轨为次要轨；主次两轨可同时显示。
+        # ASS 自带 PlayRes，mpv 会按其分辨率自动缩放。
+        dm_ok = bool(danmaku_ass) and os.path.isfile(str(danmaku_ass))
+        cc_ok = bool(subtitle_file) and os.path.isfile(str(subtitle_file))
+
+        if dm_ok and cc_ok:
+            # 弹幕 = 轨 1（主），原生字幕 = 轨 2（次）
+            # 关键：mpv 的 secondary-sub-ass-override 默认是 **strip**，
+            # 会把次轨的 ASS 样式（位置/字号/颜色）整段丢弃 —— 实测表现为字幕
+            # 变回默认小号白字并跑到画面顶部。必须显式设为 no 才能保留样式。
+            # （--sub-ass-override=no 只作用于主轨，管不到次轨。）
+            cmd += [
+                "--sub-file=" + str(danmaku_ass),
+                "--sub-file=" + str(subtitle_file),
+                "--sid=1",
+                "--secondary-sid=2",
+                "--sub-ass=yes",
+                "--sub-ass-override=no",
+                "--secondary-sub-ass-override=no",
+                "--sub-visibility=yes",
+                "--secondary-sub-visibility=yes",
+            ]
+            _emit(f"    [+] 弹幕已加载: {Path(danmaku_ass).name}（主轨）")
+            _emit(f"    [+] 字幕已加载: {Path(subtitle_file).name}（次轨）")
+        elif dm_ok:
+            cmd += ["--sub-file=" + str(danmaku_ass), "--sub-ass=yes",
+                    "--sub-ass-override=no", "--sub-visibility=yes"]
+            _emit(f"    [+] 弹幕已加载: {Path(danmaku_ass).name}")
+        elif cc_ok:
+            # 单独放字幕时走主轨；位置由 ASS 的 an/MarginV 决定
+            cmd += ["--sub-file=" + str(subtitle_file), "--sub-ass=yes",
+                    "--sub-ass-override=no", "--sub-visibility=yes"]
+            _emit(f"    [+] 字幕已加载: {Path(subtitle_file).name}")
 
         # ── SponsorBlock：注入跳过脚本 + 彩色进度条 OSC ───────────────────
         # 注意：--load-scripts=no 只禁用 scripts/ 目录自动加载，不影响显式 --script，

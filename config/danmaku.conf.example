@@ -1,0 +1,42 @@
+# ==============================================================================
+# BiliYTPlayer — 弹幕配置 【参考副本】
+#
+# 播放器实际读取的是（缺失时自动生成）：
+#   %APPDATA%\BiliYTPlayer\danmaku.conf
+# 建议用 GUI 的「弹幕设置…」按钮修改。改完后播放下一个视频即生效。
+# ==============================================================================
+
+enabled = true
+
+# 文字不透明度 0..1（1 = 完全不透明）
+opacity = 0.8
+
+# 字体
+font_face = Microsoft YaHei
+
+# 字号 = 视频高度 × 该比例
+font_size_ratio = 0.025
+
+# 滚动弹幕 / 固定弹幕 的存活秒数
+duration_marquee = 12.0
+duration_still = 5.0
+
+# 弹幕占用画面上方比例，下方留白给字幕与进度条
+display_region = 0.85
+
+# 屏蔽某类弹幕
+block_top = false
+block_bottom = false
+block_scroll = false
+
+# 关键词屏蔽，逗号分隔（命中即丢弃该条弹幕）
+block_keywords =
+
+# 同轨最小间隔（秒），越大越不拥挤
+speedup_gap = 0.2
+
+# 描边宽度，越大越清晰但越粗
+outline = 2.0
+
+# 缓存文件数上限（超出后按最久未用清理）
+cache_limit = 200

@@ -19,6 +19,9 @@ _hidden_imports = [
     "sponsorblock",
     # 受管 OSC 补丁器（同上）
     "mpv_osc",
+    # 弹幕 / 字幕（GUI 与播放路径中延迟导入）
+    "danmaku",
+    "subtitle",
     # tkinter 延迟导入
     "tkinter.filedialog",
     "tkinter.messagebox",
@@ -33,16 +36,17 @@ _hidden_imports = [
 
 # ---- 需要随 exe 一起打包的数据文件 ----
 # (源路径, 目标目录名)
-# 注意：bsponsor.lua / osc_managed.lua 都是运行时生成的，无需打包；
+# 注意：bsponsor.lua / osc_managed.lua / 弹幕 ASS 都是运行时生成的，无需打包；
 #       但 osc_base.lua 是打补丁的基线，必须随包分发，否则彩色进度条不可用。
 _add_datas = [
     # 确保模块与基线数据在导入路径中
     ("bili_clipboard_dolby.py", "."),
     ("sponsorblock.py", "."),
     ("mpv_osc.py", "."),
+    ("danmaku.py", "."),
+    ("subtitle.py", "."),
     ("osc_base.lua", "."),
 ]
-
 a = Analysis(
     ["bili_yt_player.pyw"],
     pathex=[],

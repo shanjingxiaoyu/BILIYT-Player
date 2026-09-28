@@ -226,6 +226,22 @@ class App:
             print(f"[!] SponsorBlock 配置加载失败，功能停用: {e}", flush=True)
             self.sponsor_cfg = {"enabled": False}
 
+        # 弹幕 / 字幕配置
+        try:
+            from danmaku import load_config as load_danmaku
+            self.danmaku_cfg = load_danmaku(_CONFIG_DIR, log=lambda m: print(m, flush=True))
+        except Exception as e:
+            print(f"[!] 弹幕配置加载失败，功能停用: {e}", flush=True)
+            self.danmaku_cfg = {"enabled": False}
+
+        # 字幕独立配置（字号/位置/颜色与弹幕不同，不共用一份）
+        try:
+            from subtitle import load_config as load_subtitle
+            self.subtitle_cfg = load_subtitle(_CONFIG_DIR, log=lambda m: print(m, flush=True))
+        except Exception as e:
+            print(f"[!] 字幕配置加载失败，功能停用: {e}", flush=True)
+            self.subtitle_cfg = {"enabled": False}
+
         self._build_ui()
 
         if not self.sessdata:
@@ -292,14 +308,290 @@ class App:
 
         ttk.Button(btn_frame, text="跳过设置…", command=self._open_settings).pack(side="right", padx=6)
 
-        # ---- SponsorBlock 开关 ----
+        ttk.Button(btn_frame, text="弹幕设置…", command=self._open_danmaku_settings).pack(side="right")
+
+        ttk.Button(btn_frame, text="字幕设置…", command=self._open_subtitle_settings).pack(side="right", padx=6)
+
+        # ---- 开关行 ----
+        sw = ttk.Frame(self.main_frame)
+        sw.pack(fill="x", pady=(8, 0))
+
         self.skip_var = tk.BooleanVar(value=bool(self.sponsor_cfg.get("enabled", True)))
         ttk.Checkbutton(
-            self.main_frame,
-            text="自动跳过 UP 主广告片段 (BilibiliSponsorBlock)",
-            variable=self.skip_var,
-            command=self._toggle_sponsorblock,
-        ).pack(anchor="w", pady=(8, 0))
+            sw, text="自动跳过 UP 主广告 (SponsorBlock)",
+            variable=self.skip_var, command=self._toggle_sponsorblock,
+        ).pack(side="left")
+
+        self.dm_var = tk.BooleanVar(value=bool(self.danmaku_cfg.get("enabled", True)))
+        ttk.Checkbutton(
+            sw, text="显示弹幕",
+            variable=self.dm_var, command=self._toggle_danmaku,
+        ).pack(side="left", padx=(16, 0))
+
+        self.cc_var = tk.BooleanVar(value=bool(self.subtitle_cfg.get("enabled", True)))
+        ttk.Checkbutton(
+            sw, text="显示原生字幕",
+            variable=self.cc_var, command=self._toggle_subtitle,
+        ).pack(side="left", padx=(16, 0))
+
+    def _toggle_danmaku(self):
+        """切换弹幕开关并持久化。"""
+        enabled = bool(self.dm_var.get())
+        self.danmaku_cfg["enabled"] = enabled
+        try:
+            from danmaku import save_config
+            save_config(_CONFIG_DIR, self.danmaku_cfg)
+        except Exception as e:
+            self._log(f"[!] 弹幕配置保存失败: {e}")
+        self._log("[*] 弹幕已开启（下个视频生效）。" if enabled
+                  else "[*] 弹幕已关闭（下个视频生效）。")
+
+    def _toggle_subtitle(self):
+        """切换原生字幕开关并持久化。"""
+        enabled = bool(self.cc_var.get())
+        self.subtitle_cfg["enabled"] = enabled
+        try:
+            from subtitle import save_config
+            save_config(_CONFIG_DIR, self.subtitle_cfg)
+        except Exception as e:
+            self._log(f"[!] 字幕配置保存失败: {e}")
+        self._log("[*] 原生字幕已开启（下个视频生效）。" if enabled
+                  else "[*] 原生字幕已关闭（下个视频生效）。")
+
+    # ---------- 字幕设置窗口 ----------
+    def _open_subtitle_settings(self):
+        """打开「字幕设置」窗口：位置 / 字号 / 颜色 / 边框。"""
+        from subtitle import (ALIGNMENTS, ALIGNMENT_LABELS,
+                              save_config as save_sub)
+
+        def _rev(label):
+            """中文标签 → 对齐值。"""
+            return ALIGNMENT_LABELS.get(label, "bottom-center")
+
+        win = tk.Toplevel(self.root)
+        win.title("字幕设置")
+        win.transient(self.root)
+        win.resizable(False, False)
+        try:
+            win.iconbitmap(default="")
+        except Exception:
+            pass
+
+        ttk.Label(win, text="原生字幕显示", font=("Microsoft YaHei", 11, "bold")).pack(
+            anchor="w", padx=16, pady=(14, 2))
+        ttk.Label(win, text="仅控制 B 站提供的字幕；UP 主压制在画面里的硬字幕无法调整。",
+                  foreground="#555").pack(anchor="w", padx=16, pady=(0, 4))
+        ttk.Label(win, text="保存后播放下一个视频即生效。",
+                  foreground="#555").pack(anchor="w", padx=16, pady=(0, 10))
+
+        cfg = self.subtitle_cfg
+        grid = ttk.Frame(win); grid.pack(fill="x", padx=16)
+
+        # 位置：九宫格下拉
+        ttk.Label(grid, text="对齐位置", width=14, anchor="w").grid(row=0, column=0, sticky="w", pady=3)
+        align_label = tk.StringVar(
+            value=ALIGNMENTS.get(cfg.get("alignment", "bottom-center"), "底部 中"))
+        ttk.Combobox(grid, textvariable=align_label, width=12, state="readonly",
+                     values=list(ALIGNMENTS.values())).grid(row=0, column=1, sticky="w")
+
+        def row(r, label, var, width=10):
+            ttk.Label(grid, text=label, width=14, anchor="w").grid(row=r, column=0, sticky="w", pady=3)
+            ttk.Entry(grid, textvariable=var, width=width).grid(row=r, column=1, sticky="w")
+
+        pos_var = tk.StringVar(value=str(cfg.get("position_ratio", 0.06)))
+        size_var = tk.StringVar(value=str(cfg.get("font_size_ratio", 0.045)))
+        face_var = tk.StringVar(value=str(cfg.get("font_face", "Microsoft YaHei")))
+        color_var = tk.StringVar(value=str(cfg.get("color", "#FFFFFF")))
+        back_var = tk.StringVar(value=str(cfg.get("back_color", "#000000")))
+        opac_var = tk.StringVar(value=str(cfg.get("opacity", 1.0)))
+        outl_var = tk.StringVar(value=str(cfg.get("outline", 2.0)))
+
+        row(1, "距边距离比例", pos_var)
+        row(2, "字号比例", size_var)
+        row(3, "字体", face_var, 20)
+        row(4, "文字颜色", color_var)
+        row(5, "底框颜色", back_var)
+        row(6, "不透明度(0-1)", opac_var)
+        row(7, "描边宽度", outl_var)
+        ttk.Label(grid, text="「距边距离比例」= 视频高度 × 该值（0.06 约 6%）",
+                  foreground="#888").grid(row=8, column=1, sticky="w", pady=(0, 4))
+
+        # 边框样式
+        style_frame = ttk.LabelFrame(win, text="边框样式", padding=8)
+        style_frame.pack(fill="x", padx=16, pady=(8, 0))
+        border_var = tk.StringVar(value=str(cfg.get("border_style", "box")))
+        ttk.Radiobutton(style_frame, text="不透明底框（推荐，任何画面都清晰）",
+                        variable=border_var, value="box").pack(anchor="w")
+        ttk.Radiobutton(style_frame, text="仅描边（不遮挡画面）",
+                        variable=border_var, value="outline").pack(anchor="w")
+
+        note = ttk.Label(win, text="", foreground="#0a7", wraplength=440, justify="left")
+        note.pack(anchor="w", padx=16, pady=(8, 0))
+
+        btns = ttk.Frame(win); btns.pack(fill="x", padx=16, pady=(10, 14))
+
+        def _num(v, d):
+            try:
+                return float(v.get())
+            except ValueError:
+                return d
+
+        def do_save():
+            new = dict(self.subtitle_cfg)
+            new["alignment"] = _rev(align_label.get())
+            new["position_ratio"] = max(0.0, min(0.4, _num(pos_var, 0.06)))
+            new["font_size_ratio"] = max(0.01, min(0.12, _num(size_var, 0.045)))
+            new["font_face"] = face_var.get().strip() or "Microsoft YaHei"
+            new["color"] = color_var.get().strip() or "#FFFFFF"
+            new["back_color"] = back_var.get().strip() or "#000000"
+            new["opacity"] = max(0.05, min(1.0, _num(opac_var, 1.0)))
+            new["outline"] = max(0.0, min(6.0, _num(outl_var, 2.0)))
+            new["border_style"] = border_var.get()
+            if save_sub(_CONFIG_DIR, new):
+                self.subtitle_cfg = new
+                note.configure(text="已保存，播放下一个视频即生效。", foreground="#0a7")
+                self._log(f"[*] 字幕设置已保存：{ALIGNMENTS.get(new['alignment'])}，"
+                          f"距边 {new['position_ratio']:.0%}")
+                win.after(600, win.destroy)
+            else:
+                note.configure(text="保存失败，请检查文件权限。", foreground="#c00")
+
+        ttk.Button(btns, text="保存", command=do_save).pack(side="right", padx=(6, 0))
+        ttk.Button(btns, text="取消", command=win.destroy).pack(side="right")
+        ttk.Button(btns, text="恢复默认",
+                   command=lambda: [v.set(d) for v, d in (
+                       (pos_var, "0.06"), (size_var, "0.045"),
+                       (color_var, "#FFFFFF"), (back_var, "#000000"),
+                       (opac_var, "1.0"), (outl_var, "2.0"))]
+                   or align_label.set("底部 中") or border_var.set("box")
+                   ).pack(side="left")
+
+        win.update_idletasks()
+        try:
+            px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+            pw, ph = self.root.winfo_width(), self.root.winfo_height()
+            w, h = win.winfo_width(), win.winfo_height()
+            win.geometry(f"+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 2)}")
+        except Exception:
+            pass
+
+    # ---------- 弹幕设置窗口 ----------
+    def _open_danmaku_settings(self):
+        """打开「弹幕设置」窗口。"""
+        from danmaku import DEFAULT_CONFIG, save_config as save_danmaku
+
+        win = tk.Toplevel(self.root)
+        win.title("弹幕设置")
+        win.transient(self.root)
+        win.resizable(False, False)
+        try:
+            win.iconbitmap(default="")
+        except Exception:
+            pass
+
+        ttk.Label(win, text="弹幕显示", font=("Microsoft YaHei", 11, "bold")).pack(
+            anchor="w", padx=16, pady=(14, 2))
+        ttk.Label(win, text="保存后播放下一个视频即生效，无需重启。",
+                  foreground="#555").pack(anchor="w", padx=16, pady=(0, 10))
+
+        grid = ttk.Frame(win); grid.pack(fill="x", padx=16)
+
+        def row(r, label, var, width=8):
+            ttk.Label(grid, text=label, width=18, anchor="w").grid(
+                row=r, column=0, sticky="w", pady=3)
+            e = ttk.Entry(grid, textvariable=var, width=width)
+            e.grid(row=r, column=1, sticky="w")
+            return e
+
+        cfg = self.danmaku_cfg
+        opacity_var = tk.StringVar(value=str(cfg.get("opacity", 0.8)))
+        fontsize_var = tk.StringVar(value=str(cfg.get("font_size_ratio", 0.025)))
+        marquee_var = tk.StringVar(value=str(cfg.get("duration_marquee", 12.0)))
+        still_var = tk.StringVar(value=str(cfg.get("duration_still", 5.0)))
+        region_var = tk.StringVar(value=str(cfg.get("display_region", 0.85)))
+        outline_var = tk.StringVar(value=str(cfg.get("outline", 2.0)))
+        face_var = tk.StringVar(value=str(cfg.get("font_face", "Microsoft YaHei")))
+        kw_var = tk.StringVar(value=str(cfg.get("block_keywords", "")))
+
+        row(0, "不透明度 (0-1)", opacity_var)
+        row(1, "字号比例", fontsize_var)
+        row(2, "滚动存活(秒)", marquee_var)
+        row(3, "固定存活(秒)", still_var)
+        row(4, "显示区域 (0-1)", region_var)
+        row(5, "描边宽度", outline_var)
+        row(6, "字体", face_var, width=22)
+        row(7, "屏蔽关键词", kw_var, width=22)
+        ttk.Label(grid, text="（关键词用逗号分隔，命中即丢弃该弹幕）",
+                  foreground="#888").grid(row=8, column=1, sticky="w", pady=(0, 4))
+
+        opts = ttk.LabelFrame(win, text="屏蔽类型", padding=8)
+        opts.pack(fill="x", padx=16, pady=(8, 0))
+        top_var = tk.BooleanVar(value=bool(cfg.get("block_top", False)))
+        bot_var = tk.BooleanVar(value=bool(cfg.get("block_bottom", False)))
+        scr_var = tk.BooleanVar(value=bool(cfg.get("block_scroll", False)))
+        ttk.Checkbutton(opts, text="顶部固定弹幕", variable=top_var).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(opts, text="底部固定弹幕", variable=bot_var).grid(row=0, column=1, sticky="w", padx=12)
+        ttk.Checkbutton(opts, text="滚动弹幕", variable=scr_var).grid(row=0, column=2, sticky="w", padx=12)
+
+        note = ttk.Label(win, text="", foreground="#0a7", wraplength=460, justify="left")
+        note.pack(anchor="w", padx=16, pady=(8, 0))
+
+        btns = ttk.Frame(win); btns.pack(fill="x", padx=16, pady=(10, 14))
+
+        def _num(var, default):
+            try:
+                return float(var.get())
+            except ValueError:
+                return default
+
+        def do_save():
+            new = dict(self.danmaku_cfg)
+            new["opacity"] = max(0.05, min(1.0, _num(opacity_var, 0.8)))
+            new["font_size_ratio"] = max(0.01, min(0.08, _num(fontsize_var, 0.025)))
+            new["duration_marquee"] = max(2.0, min(30.0, _num(marquee_var, 12.0)))
+            new["duration_still"] = max(1.0, min(20.0, _num(still_var, 5.0)))
+            new["display_region"] = max(0.2, min(1.0, _num(region_var, 0.85)))
+            new["outline"] = max(0.0, min(6.0, _num(outline_var, 2.0)))
+            new["font_face"] = face_var.get().strip() or "Microsoft YaHei"
+            new["block_keywords"] = kw_var.get().strip()
+            new["block_top"] = bool(top_var.get())
+            new["block_bottom"] = bool(bot_var.get())
+            new["block_scroll"] = bool(scr_var.get())
+            if save_danmaku(_CONFIG_DIR, new):
+                self.danmaku_cfg = new
+                note.configure(text="已保存，播放下一个视频即生效。", foreground="#0a7")
+                self._log("[*] 弹幕设置已保存（下个视频生效）")
+                win.after(600, win.destroy)
+            else:
+                note.configure(text="保存失败，请检查文件权限。", foreground="#c00")
+
+        def do_clear_cache():
+            try:
+                from danmaku import cache_dir_for
+                cdir = cache_dir_for(_CONFIG_DIR)
+                n = 0
+                if cdir.is_dir():
+                    for p in cdir.iterdir():
+                        if p.is_file():
+                            p.unlink()
+                            n += 1
+                self._log(f"[*] 已清空弹幕缓存（{n} 个文件）")
+                note.configure(text=f"已清空弹幕缓存：{n} 个文件", foreground="#0a7")
+            except Exception as e:
+                note.configure(text=f"清理失败: {e}", foreground="#c00")
+
+        ttk.Button(btns, text="保存", command=do_save).pack(side="right", padx=(6, 0))
+        ttk.Button(btns, text="取消", command=win.destroy).pack(side="right")
+        ttk.Button(btns, text="清空弹幕缓存", command=do_clear_cache).pack(side="left")
+
+        win.update_idletasks()
+        try:
+            px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+            pw, ph = self.root.winfo_width(), self.root.winfo_height()
+            w, h = win.winfo_width(), win.winfo_height()
+            win.geometry(f"+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 2)}")
+        except Exception:
+            pass
 
     # ---------- 跳过设置窗口 ----------
     def _open_settings(self):
@@ -764,12 +1056,26 @@ class App:
             self._log("  [!] 未能提取可播放的视频流")
             return
 
+        # ---- 弹幕（ASS 外挂）----
+        danmaku_ass, dm_count = self._prepare_danmaku(cid, dash)
+
+        # ---- 原生字幕（与弹幕并存，走次轨）----
+        subtitle_ass, cc_lang = self._prepare_subtitle(bvid, cid, dash)
+
         segments = self._fetch_sponsor_segments(bvid, cid)
         summary = self._summarize_segments(segments)
         if self.sponsor_cfg.get("enabled", True):
             self._log(f"  [*] SponsorBlock: {'命中 ' + summary if summary else '无片段'}")
 
-        suffix = f"  |  {summary}" if summary else ""
+        parts = []
+        if summary:
+            parts.append(summary)
+        if dm_count:
+            parts.append(f"弹幕 {dm_count} 条")
+        if cc_lang:
+            parts.append(f"字幕 {cc_lang}")
+        suffix = ("  |  " + "  ".join(parts)) if parts else ""
+
         self._add_history(platform, vid_label, title, vd,
                           (ad or "普通音频") + suffix, raw_id=raw_id)
 
@@ -780,7 +1086,64 @@ class App:
             self.player_path, vurl, title,
             audio_url=aurl, sessdata=self.sessdata, log=self._log,
             segments=segments, sponsor_cfg=cfg,
+            danmaku_ass=danmaku_ass, subtitle_file=subtitle_ass,
         )
+
+    # ---------- 弹幕 / 字幕 准备 ----------
+    def _prepare_danmaku(self, cid, dash):
+        """下载并转换弹幕 → (ass路径或None, 条数)。任何失败都降级为无弹幕。"""
+        if not self.danmaku_cfg.get("enabled", True):
+            return None, 0
+        try:
+            from danmaku import download_and_convert, prune_cache
+            width, height = self._stream_size(dash)
+            path, n = download_and_convert(
+                cid, width, height,
+                config_dir=_CONFIG_DIR, cfg=self.danmaku_cfg, log=self._log,
+            )
+            if path:
+                self._log(f"  [*] 弹幕: {n} 条")
+                try:
+                    prune_cache(_CONFIG_DIR, limit=int(self.danmaku_cfg.get("cache_limit", 200)))
+                except Exception:
+                    pass
+            return path, n
+        except Exception as e:
+            self._log(f"  [!] 弹幕处理失败（已忽略）: {e}")
+            return None, 0
+
+    def _prepare_subtitle(self, bvid, cid, dash):
+        """获取原生字幕 → (ass路径或None, 语言)。失败降级。"""
+        if not self.subtitle_cfg.get("enabled", True):
+            return None, ""
+        try:
+            from subtitle import ensure_subtitle_ass
+            width, height = self._stream_size(dash)
+            path, lang = ensure_subtitle_ass(
+                self.session, bvid, cid, width, height,
+                config_dir=_CONFIG_DIR, cfg=self.subtitle_cfg, log=self._log,
+            )
+            if path:
+                self._log(f"  [*] 原生字幕: {lang}")
+            return path, lang
+        except Exception as e:
+            self._log(f"  [!] 字幕处理失败（已忽略）: {e}")
+            return None, ""
+
+    @staticmethod
+    def _stream_size(dash):
+        """取所选视频流的宽高；ASS 的 PlayRes 需要它做正确缩放。"""
+        try:
+            vids = (dash or {}).get("video") or []
+            if vids:
+                best = sorted(vids, key=lambda x: (x.get("id", 0),
+                                                   x.get("bandwidth", 0)))[-1]
+                w, h = int(best.get("width") or 0), int(best.get("height") or 0)
+                if w > 0 and h > 0:
+                    return w, h
+        except Exception:
+            pass
+        return 1920, 1080
 
     def _play_bili(self, bvid):
         from bili_clipboard_dolby import get_cid

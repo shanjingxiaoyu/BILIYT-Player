@@ -31,6 +31,8 @@ BiliYTPlayer.exe
 BiliYTPlayer_old.exe
 BiliYTPlayer_release.tar.gz
 *.tar.gz
+*.zip
+*.zip.orig
 mpv-portable/
 
 # ── 日志 / 运行时数据 ─────────────────────────────────────────────────────────
