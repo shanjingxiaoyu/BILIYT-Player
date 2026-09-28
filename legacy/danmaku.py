@@ -69,12 +69,12 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
 
 DEFAULT_CONFIG = {
     "enabled": True,
-    "opacity": 0.8,            # 文字不透明度 0..1
+    "opacity": 0.7,            # 文字不透明度 0..1
     "font_face": "Microsoft YaHei",
-    "font_size_ratio": 0.05,   # 相对视频高度（1080p 下约 54px，观感接近 B 站默认）
+    "font_size_ratio": 0.04,   # 相对视频高度（各分辨率观感一致）
     "duration_marquee": 12.0,  # 滚动弹幕存活秒数
     "duration_still": 5.0,     # 固定弹幕存活秒数
-    "display_region": 0.80,    # 占用画面上方比例（下方留给字幕与 OSC）
+    "display_region": 0.30,    # 占用画面上方比例（下方留给字幕与 OSC）
     "block_top": False,        # 屏蔽顶部固定弹幕
     "block_bottom": False,     # 屏蔽底部固定弹幕
     "block_scroll": False,     # 屏蔽滚动弹幕
@@ -98,14 +98,14 @@ _CONFIG_TEMPLATE = """\
 enabled = true
 
 # 文字不透明度 0..1（1 = 完全不透明）
-opacity = 0.8
+opacity = 0.7
 
 # 字体
 font_face = Microsoft YaHei
 
-# 字号比例：字号 = 视频高度 × 该比例（0.05 ≈ 1080p 下 54px）
+# 字号比例：字号 = 视频高度 × 该比例
 # 该比例在任何分辨率下观感一致，4K 视频会自动放大，不会变小
-font_size_ratio = 0.05
+font_size_ratio = 0.04
 
 # 滚动弹幕 / 固定弹幕 的存活秒数
 duration_marquee = 12.0
@@ -113,7 +113,7 @@ duration_still = 5.0
 
 # 弹幕占用画面上方比例，下方留白给字幕与进度条
 # 注意：该值过小会显著减少可用轨道数，导致大量弹幕被丢弃（0.3 以下尤其明显）
-display_region = 0.80
+display_region = 0.30
 
 # 屏蔽某类弹幕
 block_top = false
@@ -424,7 +424,7 @@ def to_ass(items, width: int, height: int, cfg: dict = None) -> str:
     items = [x for x in (items or []) if isinstance(x, dict)]
     items.sort(key=lambda x: _safe_start(x.get("start")))
 
-    font_size = max(12, int(height * float(cfg.get("font_size_ratio", 0.028))))
+    font_size = max(12, int(height * float(cfg.get("font_size_ratio", 0.04))))
 
     # B 站弹幕 XML 的 size 字段是**为 1920x1080 画布设计的绝对像素值**（常见 25），
     # 而 ASS 的 \\fs 单位是 PlayRes 像素。直接照搬会导致：
@@ -439,10 +439,10 @@ def to_ass(items, width: int, height: int, cfg: dict = None) -> str:
     max_ratio = float(cfg.get("max_size_ratio", 1.6))
     dur_m = max(1.0, float(cfg.get("duration_marquee", 12.0)))
     dur_s = max(1.0, float(cfg.get("duration_still", 5.0)))
-    region = min(1.0, max(0.1, float(cfg.get("display_region", 0.85))))
+    region = min(1.0, max(0.1, float(cfg.get("display_region", 0.30))))
     gap = max(0.0, float(cfg.get("speedup_gap", 0.2)))
     outline = float(cfg.get("outline", 2.0))
-    alpha = _ass_alpha(cfg.get("opacity", 0.8))
+    alpha = _ass_alpha(cfg.get("opacity", 0.7))
 
     block_kw = [k.strip() for k in str(cfg.get("block_keywords") or "").split(",") if k.strip()]
 
@@ -623,9 +623,9 @@ def ensure_ass(cid, width: int, height: int, *, config_dir: Path, cfg: dict = No
     # 观感也会变成「全挤在顶部两行」。提示用户去调字号/显示区域。
     if log:
         try:
-            fs = max(12, int(int(height) * float(cfg.get("font_size_ratio", 0.05))))
+            fs = max(12, int(int(height) * float(cfg.get("font_size_ratio", 0.04))))
             lane_h = max(1, int(fs * 1.2))
-            n_lanes = max(1, int(int(height) * float(cfg.get("display_region", 0.80))) // lane_h)
+            n_lanes = max(1, int(int(height) * float(cfg.get("display_region", 0.30))) // lane_h)
             emitted = count_events(ass)
             if n_lanes < 4 or (items and emitted < len(items) * 0.6):
                 log(f"    [!] 弹幕轨道偏少（{n_lanes} 条），"

@@ -504,11 +504,11 @@ class App:
             return e
 
         cfg = self.danmaku_cfg
-        opacity_var = tk.StringVar(value=str(cfg.get("opacity", 0.8)))
-        fontsize_var = tk.StringVar(value=str(cfg.get("font_size_ratio", 0.05)))
+        opacity_var = tk.StringVar(value=str(cfg.get("opacity", 0.7)))
+        fontsize_var = tk.StringVar(value=str(cfg.get("font_size_ratio", 0.04)))
         marquee_var = tk.StringVar(value=str(cfg.get("duration_marquee", 12.0)))
         still_var = tk.StringVar(value=str(cfg.get("duration_still", 5.0)))
-        region_var = tk.StringVar(value=str(cfg.get("display_region", 0.80)))
+        region_var = tk.StringVar(value=str(cfg.get("display_region", 0.30)))
         outline_var = tk.StringVar(value=str(cfg.get("outline", 2.0)))
         face_var = tk.StringVar(value=str(cfg.get("font_face", "Microsoft YaHei")))
         kw_var = tk.StringVar(value=str(cfg.get("block_keywords", "")))
@@ -546,14 +546,14 @@ class App:
 
         def do_save():
             new = dict(self.danmaku_cfg)
-            new["opacity"] = max(0.05, min(1.0, _num(opacity_var, 0.8)))
+            new["opacity"] = max(0.05, min(1.0, _num(opacity_var, 0.7)))
             # 上限放到 0.20：原先 min(0.08, ...) 会把用户的输入压回 0.08，
             # 看起来像「设置不生效」（用户实测反馈）
-            new["font_size_ratio"] = max(0.01, min(0.20, _num(fontsize_var, 0.05)))
+            new["font_size_ratio"] = max(0.01, min(0.20, _num(fontsize_var, 0.04)))
             new["duration_marquee"] = max(2.0, min(30.0, _num(marquee_var, 12.0)))
             new["duration_still"] = max(1.0, min(20.0, _num(still_var, 5.0)))
             # 显示区域至少 0.3，否则轨道太少会导致大量弹幕被丢弃
-            new["display_region"] = max(0.3, min(1.0, _num(region_var, 0.80)))
+            new["display_region"] = max(0.3, min(1.0, _num(region_var, 0.30)))
             new["outline"] = max(0.0, min(6.0, _num(outline_var, 2.0)))
             new["font_face"] = face_var.get().strip() or "Microsoft YaHei"
             new["block_keywords"] = kw_var.get().strip()

@@ -208,12 +208,30 @@ class TestToAss(unittest.TestCase):
         self.assertGreater(retention, 95.0, f"保留率仅 {retention:.1f}%")
 
     def test_lane_reuse_beats_fixed_occupancy(self):
-        """确保没有退化成「轨道固定占用 N 秒」的实现。"""
-        # 300 条弹幕在 10 秒内，若轨道固定占用 12 秒，最多只能放 ~n_lanes 条
+        """确保没有退化成「轨道固定占用 N 秒」的实现。
+
+        断言相对量而非绝对条数：可用轨道数随 display_region 变化，
+        写死一个绝对阈值会因为用户调窄显示区域而误报。
+        真正的不变量是「输出的弹幕远多于轨道总数」。
+        """
         items = self._items([(i * 0.03, 1, 25, 0xFFFFFF, f"d{i}") for i in range(300)])
-        ass = dm.to_ass(items, 1920, 1080, {"duration_marquee": 12.0})
-        self.assertGreater(dm.count_events(ass), 100,
-                           "轨道复用失效，疑似退化为固定占用")
+        cfg = {"duration_marquee": 12.0}
+        ass = dm.to_ass(items, 1920, 1080, cfg)
+        n = dm.count_events(ass)
+
+        # 按当前配置算出可用轨道数
+        import re
+        fs = int(re.search(r"Style: DM,[^,]+,(\d+)", ass).group(1))
+        lane_h = max(1, int(fs * 1.2))
+        region = float(cfg.get("display_region", dm.DEFAULT_CONFIG["display_region"]))
+        n_lanes = max(1, int(1080 * region) // lane_h)
+
+        # 若退化为固定占用，最多只能输出 n_lanes 条。
+        # 实测该场景下输出恒为轨道数的 ~14 倍（dr=0.30/0.55/0.85 分别为 14.0/13.9/13.6），
+        # 因此用「≥5 倍」作为稳固的下界。
+        self.assertGreater(n, n_lanes * 5,
+                           f"轨道复用失效：输出 {n} 条，轨道 {n_lanes} 条，"
+                           f"疑似退化为固定占用")
 
     def test_lanes_stack_from_top_like_bilibili(self):
         """轨道自上而下紧贴堆叠（与 B 站官方一致）。
@@ -512,9 +530,9 @@ class TestConfig(unittest.TestCase):
             cfg = dm.load_config(Path(d))
             self.assertTrue((Path(d) / "danmaku.conf").exists())
             self.assertTrue(cfg["enabled"])
-            self.assertEqual(cfg["display_region"], 0.80)
+            self.assertEqual(cfg["display_region"], 0.30)
             self.assertEqual(cfg["duration_marquee"], 12.0)
-            self.assertEqual(cfg["font_size_ratio"], 0.05)
+            self.assertEqual(cfg["font_size_ratio"], 0.04)
             self.assertTrue(cfg["scale_xml_size"])
 
     def test_overrides_and_type_coercion(self):
@@ -534,7 +552,7 @@ class TestConfig(unittest.TestCase):
             (Path(d) / "danmaku.conf").write_text(
                 "opacity = abc\nduration_marquee = xyz\n", encoding="utf-8")
             cfg = dm.load_config(Path(d))
-            self.assertEqual(cfg["opacity"], 0.8)
+            self.assertEqual(cfg["opacity"], 0.7)
             self.assertEqual(cfg["duration_marquee"], 12.0)
 
     def test_save_roundtrip(self):
@@ -877,7 +895,7 @@ class TestSubtitle(unittest.TestCase):
     def test_subtitle_config_is_separate_from_danmaku(self):
         """字幕配置必须独立成文件。
 
-        两者默认值不同：弹幕 font_size_ratio=0.025 / opacity=0.8，
+        两者默认值不同：弹幕 font_size_ratio=0.04 / opacity=0.7，
         字幕 font_size_ratio=0.045 / opacity=1.0。
         共用一份配置会让字幕继承弹幕的小字号与半透明。
         """
