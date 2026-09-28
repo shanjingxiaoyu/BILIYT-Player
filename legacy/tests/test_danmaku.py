@@ -215,12 +215,12 @@ class TestToAss(unittest.TestCase):
         self.assertGreater(dm.count_events(ass), 100,
                            "轨道复用失效，疑似退化为固定占用")
 
-    def test_lanes_are_used_evenly(self):
-        """轨道选择不能总取第一条空闲的。
+    def test_lanes_stack_from_top_like_bilibili(self):
+        """轨道自上而下紧贴堆叠（与 B 站官方一致）。
 
-        真实问题：早期实现每次从头找第一条空闲轨道，导致第 0 轨被反复复用，
-        实测 33% 的弹幕挤在最上面一行，视觉上明显偏上。
-        改为「选空闲最久的轨道」后，各轨占用应大致均衡。
+        注：早期我曾断言「各轨占用均衡」，但那是错的 ——
+        均匀分布会让弹幕撒满整个区域，观感稀疏、不像 B 站。
+        用户实测后要求改回官方那种自上而下紧贴的堆叠方式。
         """
         import collections
         import re
@@ -229,10 +229,10 @@ class TestToAss(unittest.TestCase):
         ys = [int(m.group(1)) for m in re.finditer(r"\\move\(\d+,(\d+),", ass)]
         self.assertGreater(len(ys), 100)
         counts = collections.Counter(ys)
-        top_share = counts.most_common(1)[0][1] / len(ys)
-        self.assertLess(top_share, 0.15,
-                        f"最热轨道占了 {top_share:.0%}，轨道分配不均")
-        self.assertGreater(len(counts), 5, "只用了很少的轨道")
+        ordered = [counts[y] for y in sorted(counts)]
+        self.assertGreater(ordered[0], ordered[-1],
+                           "顶部轨道应比底部用得多（自上而下堆叠）")
+        self.assertGreater(len(counts), 3, "只用了很少的轨道")
 
     def test_no_danmaku_clipped_at_top(self):
         """第一条轨道的 y 必须至少留出一个行高，否则文字会被顶边裁掉。"""
@@ -277,6 +277,168 @@ class TestToAss(unittest.TestCase):
                  {"start": 2.0, "mode": 1, "text": "ok"}]
         ass = dm.to_ass(items, 1920, 1080)
         self.assertEqual(dm.count_events(ass), 1)
+
+
+class TestReportedBugs(unittest.TestCase):
+    """用户实测反馈的三个 bug 的回归测试。"""
+
+    def _items(self, n=1, size=25):
+        return [{"start": float(i), "mode": 1, "size": size,
+                 "color": 0xFFFFFF, "text": f"d{i}"} for i in range(n)]
+
+    @staticmethod
+    def _fs(ass):
+        import re
+        return int(re.search(r"\\fs(\d+)", ass).group(1))
+
+    # ---- bug 3：4K 视频弹幕小到不能看 ----
+
+    def test_bug3_same_visual_size_at_all_resolutions(self):
+        """字号必须按分辨率等比缩放。
+
+        真实 bug：B 站 XML 的 size 字段是为 1920x1080 设计的绝对像素（常见 25），
+        却被直接当作 ASS 字号使用。结果 1080p 是 2.3% 屏高，
+        4K 只有 1.2% —— 用户实测「4K 弹幕小到不能看」。
+        """
+        cfg = {"font_size_ratio": 0.05, "scale_xml_size": True, "display_region": 0.85}
+        pcts = []
+        for W, H in ((1920, 1080), (4096, 2048), (3840, 2160), (1280, 720)):
+            with self.subTest(res=f"{W}x{H}"):
+                fs = self._fs(dm.to_ass(self._items(), W, H, cfg))
+                pct = fs / H
+                pcts.append(pct)
+                self.assertAlmostEqual(pct, 0.05, delta=0.006,
+                                       msg=f"{W}x{H} 字号占屏 {pct:.1%}，应约 5%")
+        # 所有分辨率的观感应一致
+        self.assertLess(max(pcts) - min(pcts), 0.01,
+                        f"各分辨率观感不一致: {[round(p,3) for p in pcts]}")
+
+    def test_bug3_four_k_is_not_smaller_than_1080p(self):
+        cfg = {"font_size_ratio": 0.05, "scale_xml_size": True}
+        small = self._fs(dm.to_ass(self._items(), 1920, 1080, cfg))
+        big = self._fs(dm.to_ass(self._items(), 3840, 2160, cfg))
+        self.assertGreater(big, small * 1.8, "4K 字号未按比例放大")
+
+    def test_bug3_scale_can_be_disabled(self):
+        """关掉 scale_xml_size 后，所有弹幕都退回统一的基准字号，
+        不再体现各自原有的相对大小（供对照/排障用）。"""
+        base = {"font_size_ratio": 0.05, "scale_xml_size": False}
+        small = self._fs(dm.to_ass(self._items(1, size=25), 1920, 1080, base))
+        large = self._fs(dm.to_ass(self._items(1, size=36), 1920, 1080, base))
+        self.assertEqual(small, large,
+                         "关闭缩放后不同 size 应得到相同字号")
+        # 但基准字号仍随分辨率缩放（否则 4K 又变小了）
+        big = self._fs(dm.to_ass(self._items(1, size=25), 3840, 2160, base))
+        self.assertGreater(big, small * 1.8)
+
+    def test_bug3_relative_size_differences_kept(self):
+        """弹幕之间原有的相对大小差异要保留（有人发大字号）。"""
+        cfg = {"font_size_ratio": 0.05, "scale_xml_size": True}
+        a = self._fs(dm.to_ass(self._items(1, size=25), 1920, 1080, cfg))
+        b = self._fs(dm.to_ass(self._items(1, size=36), 1920, 1080, cfg))
+        self.assertGreater(b, a, "大字号弹幕未体现出来")
+
+    def test_bug3_font_size_ratio_is_respected(self):
+        """font_size_ratio 必须真正改变字号（用户说改了没反应）。"""
+        sizes = []
+        for r in (0.03, 0.05, 0.08, 0.15):
+            fs = self._fs(dm.to_ass(self._items(), 1920, 1080,
+                                   {"font_size_ratio": r, "scale_xml_size": True}))
+            sizes.append(fs)
+        self.assertEqual(sizes, sorted(sizes), f"字号未随比例单调变化: {sizes}")
+        self.assertGreater(sizes[-1], sizes[0] * 3,
+                           f"比例变化未充分反映到字号: {sizes}")
+
+    # ---- bug 1：GUI 改了字号保存后仍是默认值 ----
+
+    def test_bug1_cache_key_includes_style(self):
+        """缓存文件名必须含样式指纹。
+
+        真实 bug：文件名只有 `<cid>_<W>x<H>.danmaku.ass`。
+        用户改字号后旧缓存仍被命中，设置看起来「完全没生效」。
+        """
+        items = self._items(1)
+        with tempfile.TemporaryDirectory() as d:
+            a = dm.ensure_ass(9, 1920, 1080, config_dir=Path(d), items=items,
+                              cfg={"font_size_ratio": 0.05})
+            b = dm.ensure_ass(9, 1920, 1080, config_dir=Path(d), items=items,
+                              cfg={"font_size_ratio": 0.08})
+            self.assertNotEqual(a, b, "改字号后仍命中同一缓存文件")
+            self.assertTrue(a.is_file() and b.is_file())
+
+    def test_bug1_each_style_key_changes_cache(self):
+        """任一影响渲染的样式项变化都必须产生新的缓存文件。"""
+        items = self._items(1)
+        base = {"font_size_ratio": 0.05, "display_region": 0.55, "opacity": 0.8,
+                "duration_marquee": 12.0, "outline": 2.0}
+        with tempfile.TemporaryDirectory() as d:
+            ref = dm.ensure_ass(7, 1920, 1080, config_dir=Path(d),
+                                items=items, cfg=base)
+            for key, val in (("font_size_ratio", 0.09), ("display_region", 0.9),
+                             ("opacity", 0.3), ("duration_marquee", 6.0),
+                             ("outline", 4.0), ("block_scroll", True)):
+                with self.subTest(key=key):
+                    cfg = dict(base)
+                    cfg[key] = val
+                    p = dm.ensure_ass(7, 1920, 1080, config_dir=Path(d),
+                                      items=items, cfg=cfg)
+                    self.assertNotEqual(p, ref, f"改 {key} 未产生新缓存")
+
+    # ---- bug 2：弹幕分布不如之前 ----
+
+    def test_bug2_lanes_fill_from_top(self):
+        """轨道应从最上方开始紧贴堆叠（B 站官方观感）。
+
+        真实 bug：我曾把选择策略改成「选空闲最久的轨道」以求均匀分布，
+        结果弹幕被均匀撒满整个区域，看起来稀疏、不像 B 站（用户要求改回）。
+        """
+        import collections
+        import re
+        items = self._items(400)
+        items = [dict(x, start=i * 0.05) for i, x in enumerate(items)]
+        ass = dm.to_ass(items, 1920, 1080,
+                        {"display_region": 0.85, "font_size_ratio": 0.05,
+                         "duration_marquee": 12.0})
+        ys = [int(m.group(1)) for m in re.finditer(r"\\move\(\d+,(\d+),", ass)]
+        self.assertGreater(len(ys), 50)
+        cnt = collections.Counter(ys)
+        ordered = [cnt[y] for y in sorted(cnt)]
+        # 从上到下应大体递减（上面的轨道用得多）
+        self.assertGreaterEqual(ordered[0], ordered[-1],
+                                f"顶部轨道未优先使用: {list(zip(sorted(cnt), ordered))[:5]}")
+
+    def test_bug2_uses_topmost_free_lane(self):
+        """直接验证 _pick_lane 的语义：返回第一条空闲轨道。"""
+        self.assertEqual(dm._pick_lane([0.0, 5.0, 0.0], 1.0), 0)
+        self.assertEqual(dm._pick_lane([5.0, 0.0, 0.0], 1.0), 1)
+        self.assertIsNone(dm._pick_lane([5.0, 5.0], 1.0))
+
+    def test_bug2_not_flat_across_lanes(self):
+        """轨道占用必须「上重下轻」，不能是平的。
+
+        真实 bug：我曾改为「选空闲最久的轨道」，结果各轨占用几乎完全均匀
+        （实测顶轨 108 条 / 底轨 107 条 —— 基本是平的），
+        弹幕被均匀撒满整个区域，观感稀疏、不像 B 站。
+        改回「最上面第一条空闲轨道」后为 132 / 38，明显上重下轻。
+        这里用顶/底轨比值区分两种策略。
+        """
+        import collections
+        import re
+        # 密集场景才能体现两种策略的差异
+        items = [{"start": i * 0.08, "mode": 1, "size": 25,
+                  "color": 0xFFFFFF, "text": f"d{i}"} for i in range(1500)]
+        ass = dm.to_ass(items, 1920, 1080,
+                        {"display_region": 0.85, "font_size_ratio": 0.05,
+                         "duration_marquee": 12.0})
+        ys = [int(m.group(1)) for m in re.finditer(r"\\move\(\d+,(\d+),", ass)]
+        self.assertGreater(len(ys), 500)
+        counts = collections.Counter(ys)
+        ordered = [counts[y] for y in sorted(counts)]
+        self.assertGreater(len(ordered), 3)
+        ratio = ordered[0] / max(1, ordered[-1])
+        self.assertGreater(ratio, 1.5,
+                           f"顶/底轨比值仅 {ratio:.2f}，分布过于均匀"
+                           f"（疑似回到「选空闲最久」策略）: {ordered}")
 
 
 class TestFetchXml(unittest.TestCase):
@@ -350,8 +512,10 @@ class TestConfig(unittest.TestCase):
             cfg = dm.load_config(Path(d))
             self.assertTrue((Path(d) / "danmaku.conf").exists())
             self.assertTrue(cfg["enabled"])
-            self.assertEqual(cfg["display_region"], 0.85)
+            self.assertEqual(cfg["display_region"], 0.55)
             self.assertEqual(cfg["duration_marquee"], 12.0)
+            self.assertEqual(cfg["font_size_ratio"], 0.05)
+            self.assertTrue(cfg["scale_xml_size"])
 
     def test_overrides_and_type_coercion(self):
         with tempfile.TemporaryDirectory() as d:

@@ -71,16 +71,17 @@ DEFAULT_CONFIG = {
     "enabled": True,
     "opacity": 0.8,            # 文字不透明度 0..1
     "font_face": "Microsoft YaHei",
-    "font_size_ratio": 0.025,  # 相对视频高度
+    "font_size_ratio": 0.05,   # 相对视频高度（1080p 下约 54px，观感接近 B 站默认）
     "duration_marquee": 12.0,  # 滚动弹幕存活秒数
     "duration_still": 5.0,     # 固定弹幕存活秒数
-    "display_region": 0.85,    # 占用画面上方比例（下方留给真字幕与 OSC）
+    "display_region": 0.55,    # 占用画面上方比例（下方留给字幕与 OSC）
     "block_top": False,        # 屏蔽顶部固定弹幕
     "block_bottom": False,     # 屏蔽底部固定弹幕
     "block_scroll": False,     # 屏蔽滚动弹幕
     "block_keywords": "",      # 逗号分隔关键词，命中即丢弃
     "speedup_gap": 0.2,        # 同轨最小间隔（秒）
     "outline": 2.0,            # 描边宽度（可读性）
+    "scale_xml_size": True,    # 把 B 站的字号字段按 1080p 基准等比放大
     "cache_limit": 200,        # 缓存文件数上限
 }
 
@@ -102,15 +103,17 @@ opacity = 0.8
 # 字体
 font_face = Microsoft YaHei
 
-# 字号 = 视频高度 × 该比例
-font_size_ratio = 0.025
+# 字号比例：字号 = 视频高度 × 该比例（0.05 ≈ 1080p 下 54px）
+# 该比例在任何分辨率下观感一致，4K 视频会自动放大，不会变小
+font_size_ratio = 0.05
 
 # 滚动弹幕 / 固定弹幕 的存活秒数
 duration_marquee = 12.0
 duration_still = 5.0
 
 # 弹幕占用画面上方比例，下方留白给字幕与进度条
-display_region = 0.85
+# 注意：该值过小会显著减少可用轨道数，导致大量弹幕被丢弃（0.3 以下尤其明显）
+display_region = 0.55
 
 # 屏蔽某类弹幕
 block_top = false
@@ -125,6 +128,10 @@ speedup_gap = 0.2
 
 # 描边宽度，越大越清晰但越粗
 outline = 2.0
+
+# 把 B 站的字号字段按 1080p 基准等比缩放（true 时 4K 视频字号自动放大）
+# 关掉后直接使用 B 站原始像素值，4K 下会显得很小
+scale_xml_size = true
 
 # 缓存文件数上限（超出后按最久未用清理）
 cache_limit = 200
@@ -380,20 +387,20 @@ def _safe_start(x) -> float:
 
 
 def _pick_lane(free, t0):
-    """在所有已空闲的轨道里挑一条，返回下标；都不空闲返回 None。
+    """从最上面开始找第一条空闲轨道；都不空闲返回 None。
 
-    选择依据是「哪条轨道空闲得最久」（lane_free 最小）。
-    若改成「取第一条空闲轨道」，第 0 轨会被反复复用 ——
-    实测 33% 的弹幕挤在最上面一行，视觉上明显偏上。
-    因为只要求「存在空闲轨道」，选哪条都不影响保留率。
+    这就是 B 站官方播放器的行为：弹幕**从顶部向下紧贴堆叠**，
+    新弹幕优先占用最上面的空轨道，下方轨道只在必要时才被使用。
+
+    历史教训：我曾改成「选空闲最久的轨道」以求各轨均匀分布，
+    结果弹幕被均匀撒满整个区域，看起来稀疏、不像 B 站，
+    且与 display_region 叠加后观感更差（用户实测反馈要改回来）。
+    均匀分布并不是用户想要的 —— 还原官方观感才是。
     """
-    best = None
-    best_free = None
     for i, ft in enumerate(free):
-        if ft <= t0 and (best_free is None or ft < best_free):
-            best = i
-            best_free = ft
-    return best
+        if ft <= t0:
+            return i
+    return None
 
 
 def to_ass(items, width: int, height: int, cfg: dict = None) -> str:
@@ -417,7 +424,19 @@ def to_ass(items, width: int, height: int, cfg: dict = None) -> str:
     items = [x for x in (items or []) if isinstance(x, dict)]
     items.sort(key=lambda x: _safe_start(x.get("start")))
 
-    font_size = max(12, int(height * float(cfg.get("font_size_ratio", 0.025))))
+    font_size = max(12, int(height * float(cfg.get("font_size_ratio", 0.028))))
+
+    # B 站弹幕 XML 的 size 字段是**为 1920x1080 画布设计的绝对像素值**（常见 25），
+    # 而 ASS 的 \\fs 单位是 PlayRes 像素。直接照搬会导致：
+    #   1080p -> 25px = 2.3% 屏高（尚可）
+    #   4K    -> 25px = 1.2% 屏高（小到看不清，用户实测反馈）
+    # 因此改为「按 1080p 基准的相对比例」：
+    #   最终字号 = 视频高度 × font_size_ratio × (该弹幕 size / 25)
+    # 这样 font_size_ratio 在任何分辨率下都是同一个观感，
+    # 而弹幕之间原有的相对大小差异（有人发大字号）依然保留。
+    XML_BASE_SIZE = 25.0
+    scale_xml = bool(cfg.get("scale_xml_size", True))
+    max_ratio = float(cfg.get("max_size_ratio", 1.6))
     dur_m = max(1.0, float(cfg.get("duration_marquee", 12.0)))
     dur_s = max(1.0, float(cfg.get("duration_still", 5.0)))
     region = min(1.0, max(0.1, float(cfg.get("display_region", 0.85))))
@@ -458,9 +477,18 @@ def to_ass(items, width: int, height: int, cfg: dict = None) -> str:
             t0 = max(0.0, float(it.get("start")))
         except (TypeError, ValueError):
             continue
-        size = int(it.get("size") or font_size)
-        # 弹幕自带字号差异较大，收敛到合理区间
-        size = max(12, min(size, int(font_size * 1.8)))
+        # 字号：以 font_size_ratio 为基准，再乘以该弹幕原有的相对大小。
+        # font_size_ratio 在任何分辨率下观感一致（这是修 4K 弹幕过小的关键）。
+        try:
+            raw_size = float(it.get("size") or 0)
+        except (TypeError, ValueError):
+            raw_size = 0.0
+        if scale_xml and raw_size > 0:
+            ratio = raw_size / XML_BASE_SIZE
+        else:
+            ratio = 1.0
+        ratio = max(0.5, min(ratio, max_ratio))
+        size = max(12, int(round(font_size * ratio)))
         color = _ass_color(it.get("color", 0xFFFFFF))
         esc = _escape_ass(text)
 
@@ -535,15 +563,33 @@ def to_ass(items, width: int, height: int, cfg: dict = None) -> str:
 # 落盘与缓存
 # ============================================================================
 
+def _style_fingerprint(cfg: dict, width: int, height: int) -> str:
+    """样式指纹：样式一变，缓存文件名就变。
+
+    真实 bug：原先缓存文件名只有 `<cid>_<W>x<H>.danmaku.ass`，
+    不带任何样式信息。用户在 GUI 改了字号/位置后，旧缓存仍被命中，
+    设置看起来「完全没生效」（用户实测反馈）。
+    """
+    import hashlib
+    keys = ("font_face", "font_size_ratio", "opacity", "display_region",
+            "duration_marquee", "duration_still", "outline", "speedup_gap",
+            "block_top", "block_bottom", "block_scroll", "block_keywords",
+            "scale_xml_size", "max_size_ratio")
+    raw = "|".join(f"{k}={cfg.get(k, DEFAULT_CONFIG.get(k))}" for k in keys)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+
+
 def ensure_ass(cid, width: int, height: int, *, config_dir: Path, cfg: dict = None,
                items=None, force: bool = False, log=None) -> Path | None:
     """生成（或复用缓存）某视频的弹幕 ASS，返回路径；失败返回 None。
 
-    items 为 None 时自动下载并解析。缓存 key 含分辨率，避免同一视频不同清晰度串档。
+    items 为 None 时自动下载并解析。缓存 key 含分辨率与**样式指纹**，
+    保证改样式后一定重新生成。
     """
-    cfg = cfg or DEFAULT_CONFIG
+    cfg = dict(DEFAULT_CONFIG, **(cfg or {}))
     cdir = cache_dir_for(config_dir)
-    path = cdir / f"{cid}_{int(width)}x{int(height)}.danmaku.ass"
+    fp = _style_fingerprint(cfg, width, height)
+    path = cdir / f"{cid}_{int(width)}x{int(height)}.{fp}.danmaku.ass"
 
     if not force and path.is_file() and path.stat().st_size > 0:
         try:
@@ -572,6 +618,21 @@ def ensure_ass(cid, width: int, height: int, *, config_dir: Path, cfg: dict = No
         if log:
             log(f"    [!] 弹幕写入失败（已忽略）: {e}")
         return None
+
+    # 可用轨道太少会让大量弹幕被丢弃（实测 2 条轨道时保留率仅 21%），
+    # 观感也会变成「全挤在顶部两行」。提示用户去调字号/显示区域。
+    if log:
+        try:
+            fs = max(12, int(int(height) * float(cfg.get("font_size_ratio", 0.05))))
+            lane_h = max(1, int(fs * 1.2))
+            n_lanes = max(1, int(int(height) * float(cfg.get("display_region", 0.55))) // lane_h)
+            emitted = count_events(ass)
+            if n_lanes < 4 or (items and emitted < len(items) * 0.6):
+                log(f"    [!] 弹幕轨道偏少（{n_lanes} 条），"
+                    f"{len(items) - emitted}/{len(items)} 条被丢弃；"
+                    f"可调小字号比例或调大显示区域")
+        except Exception:
+            pass
     return path
 
 

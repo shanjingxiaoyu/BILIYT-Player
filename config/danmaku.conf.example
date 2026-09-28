@@ -14,15 +14,17 @@ opacity = 0.8
 # 字体
 font_face = Microsoft YaHei
 
-# 字号 = 视频高度 × 该比例
-font_size_ratio = 0.025
+# 字号比例：字号 = 视频高度 × 该比例（0.05 ≈ 1080p 下 54px）
+# 该比例在任何分辨率下观感一致，4K 视频会自动放大，不会变小
+font_size_ratio = 0.05
 
 # 滚动弹幕 / 固定弹幕 的存活秒数
 duration_marquee = 12.0
 duration_still = 5.0
 
 # 弹幕占用画面上方比例，下方留白给字幕与进度条
-display_region = 0.85
+# 注意：该值过小会显著减少可用轨道数，导致大量弹幕被丢弃（0.3 以下尤其明显）
+display_region = 0.55
 
 # 屏蔽某类弹幕
 block_top = false
@@ -37,6 +39,10 @@ speedup_gap = 0.2
 
 # 描边宽度，越大越清晰但越粗
 outline = 2.0
+
+# 把 B 站的字号字段按 1080p 基准等比缩放（true 时 4K 视频字号自动放大）
+# 关掉后直接使用 B 站原始像素值，4K 下会显得很小
+scale_xml_size = true
 
 # 缓存文件数上限（超出后按最久未用清理）
 cache_limit = 200
