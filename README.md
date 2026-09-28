@@ -1,7 +1,8 @@
 # BiliYTPlayer — 剪贴板直连播放器
 
 > 复制 B 站 / YouTube 链接到剪贴板，自动用内置 mpv 播放。
-> 支持 B 站 DASH 直链、杜比视界、HDR 动态映射、YouTube 最高 4K 流、**UP 主广告自动跳过**。
+> 支持 B 站 DASH 直链、杜比视界、HDR 动态映射、YouTube 最高 4K 流、
+> **UP 主广告自动跳过**、**B 站弹幕**、**原生字幕（CC / AI）**。
 
 ## 架构
 
@@ -12,24 +13,44 @@ sponsorblock.py         广告跳过：片段查询 / 过滤 / 载荷构造 / �
 danmaku.py              弹幕：下载 / deflate 解压 / XML 解析 / ASS 转换 / 缓存
 subtitle.py             原生字幕（CC / AI）：查询 / 下载 / ASS 转换
 mpv_osc.py              受管 OSC：给 osc.lua 打补丁（彩色进度条 + 去广告时长）
+osc_base.lua            基线 osc.lua（mpv v0.41.0-244-gaf9c81fa1，LGPLv2.1+）
 mpv-portable/mpv.exe    播放器（所有解码、渲染、色调映射在此完成）
 mpv-portable/yt-dlp.exe YouTube URL 解析（由 mpv 内置 ytdl_hook 调用）
 config/mpv.conf         mpv 渲染 / 同步 / 缓冲 / HDR 映射配置（参考副本）
 config/input.conf       mpv 快捷键配置（参考副本）
 config/sponsorblock.conf.example  广告跳过配置（参考副本）
 config/danmaku.conf.example       弹幕配置（参考副本）
+config/subtitle.conf.example      字幕配置（参考副本）
 ```
 
 播放流程：剪贴板监听线程只做读取 + 正则匹配，检测到新链接入队；工作线程消费队列，调用 B 站 API 或 yt-dlp 解析出真实流地址，启动 mpv 播放。监听线程全程非阻塞。
 
 广告跳过流程：工作线程拿到 `cid` 后查询 SponsorBlock 片段 → 过滤分类 → 载荷经环境变量传给 mpv 的 Lua 脚本 → mpv 在播放中比对进度并 seek 跳过。查询失败或超时一律静默降级，不影响播放。
 
+弹幕/字幕流程：工作线程用同一个 `cid` 下载弹幕 XML 并转成 ASS，同时查询原生字幕，
+两者作为两条字幕轨交给 mpv（弹幕主轨、字幕次轨）。任何一步失败都降级为「没有弹幕/字幕」，不影响播放。
+
 ## 使用
 
 1. 从 **Releases** 下载二进制包（包含 `BiliYTPlayer.exe` + `mpv-portable/`）
 2. 解压后双击 `BiliYTPlayer.exe`
 3. 复制 B 站 / YouTube 视频链接到剪贴板，自动播放
-4. 按 `q` 退出，`f` 全屏，`` ` `` 查看渲染统计，`n` 跳到下一广告片段（mpv 默认快捷键见 `config/input.conf`）
+4. 主窗口有三个勾选框（广告跳过 / 弹幕 / 原生字幕）与三个设置按钮
+5. mpv 快捷键：`q` 退出、`f` 全屏、`` ` `` 查看渲染统计、`n` 跳到下一广告片段、`Enter` 撤销跳过
+
+### 主窗口功能
+
+| 控件 | 说明 |
+|------|------|
+| **自动跳过 UP 主广告** | SponsorBlock 广告跳过总开关 |
+| **显示弹幕** | 弹幕总开关 |
+| **显示原生字幕** | B 站 CC / AI 字幕开关 |
+| **跳过设置…** | 逐分类选择跳过档位、撤销窗口、最短片段长度 |
+| **弹幕设置…** | 不透明度、字号、存活时长、显示区域、屏蔽词、清空缓存 |
+| **字幕设置…** | 对齐位置（九宫格）、距边距离、字号、颜色、边框样式 |
+| **播放历史** | 双击任意条目即可重播该视频 |
+
+所有设置**保存后播放下一个视频即生效**，无需重启。
 
 ### 从源码运行
 
@@ -119,7 +140,7 @@ GUI 主窗口的 **「跳过设置…」** 按钮可逐类选择档位，并调�
   现在按 `视频高度 × font_size_ratio` 换算，各分辨率观感一致
 - **自上而下紧贴堆叠**：与 B 站官方播放器一致，新弹幕优先占用最上面的空轨道
 - **彩色**：保留弹幕原始颜色；滚动/顶部/底部三种模式分别处理
-- **避让**：默认只占画面上方 55%，下方留给原生字幕与进度条
+- **避让**：默认占画面上方 80%，下方留给原生字幕与进度条（两者不重叠，已按像素实测）
 
 ### 原生字幕（CC / AI 字幕）
 
@@ -202,6 +223,19 @@ python -m unittest discover -s legacy/tests -t .
 ## 敏感信息声明
 
 仓库不含任何账号凭证。B 站 SESSDATA 通过本地 `.env` 文件提供（已在 .gitignore 中排除），请勿提交。
+`legacy/tests/` 与源码中不包含任何真实 Cookie；弹幕/字幕/SponsorBlock 的测试均使用合成数据或公开接口。
+
+## 第三方组件与许可
+
+| 组件 | 位置 | 许可 |
+|------|------|------|
+| `osc_base.lua` | `legacy/osc_base.lua` | 取自 mpv 的 `player/lua/osc.lua`（mpv 项目为 LGPLv2.1+ / GPLv2+），commit `af9c81fa1`，仅作运行时打补丁的基线 |
+| mpv | `mpv-portable/mpv.exe` | 由 Releases 单独分发，**不在本仓库中** |
+| yt-dlp | `mpv-portable/yt-dlp.exe` | 由 Releases 单独分发，**不在本仓库中** |
+| BilibiliSponsorBlock 数据 | `bsbsb.top` | 仅调用其公开 API，不包含其代码 |
+
+本仓库**未**引入 `biliass` / `yt-dlp-danmaku`（详见「关键设计」）。
+本仓库自身尚未声明 LICENSE。
 
 ## 环境要求
 
