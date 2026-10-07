@@ -18,10 +18,12 @@ Windows 下无控制台黑框，只有一个主窗口显示状态日志与播放
 import configparser
 import ctypes
 import ctypes.wintypes
+import io
 import json
 import os
 import queue
 import re
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -805,6 +807,133 @@ def _get_clipboard_text() -> str:
 # mpv 启动
 # ============================================================================
 
+_ipc_capable = None           # 首次拉起 mpv 时探测一次并缓存
+_ipc_capable_lock = threading.Lock()
+
+_PIPE_PREFIX = "\\\\.\\pipe\\"
+
+
+def _mpv_supports_ipc(mpv_path: str) -> bool:
+    """这个 mpv 认不认 --input-ipc-server。必须先看一眼：mpv 对不认识的
+    命令行选项是 fatal 退出，冒然加上会把播放本身一起带走。"""
+    global _ipc_capable
+    with _ipc_capable_lock:
+        if _ipc_capable is None:
+            try:
+                out = subprocess.run(
+                    [mpv_path, "--list-options"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, encoding="utf-8", errors="replace", timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                    if sys.platform == "win32" else 0).stdout
+                _ipc_capable = "input-ipc-server" in out
+            except Exception as e:
+                _log(f"[!] 探测 mpv IPC 能力失败（{type(e).__name__}），"
+                     "本次不传 --input-ipc-server")
+                _ipc_capable = False
+    return _ipc_capable
+
+
+def _mpv_ipc_pipe() -> str:
+    """管道名带随机段：本机其他进程猜不到，也就驱动不了这个 mpv。"""
+    return f"cbtompv-{os.getpid()}-{secrets.token_hex(3)}"
+
+
+def _ipc_ask(raw, rd, prop: str, rid: int, deadline: float):
+    """发一条 get_property，读到与 rid 配对的回应为止。
+
+    mpv 会把事件（start-file / audio-reconfig / file-loaded…）也推给这条连接，
+    事件行没有 request_id。不跳过它们的话，播放刚开始时会把事件当回应，
+    三个属性全被误判成“这个 mpv 不认”，回填就静默失效了。
+    """
+    raw.write(json.dumps({"command": ["get_property", prop], "request_id": rid})
+              .encode("utf-8") + b"\n")
+    raw.flush()
+    while time.time() < deadline:
+        line = rd.readline()
+        if not line:
+            return None                       # mpv 退出，管道关了
+        try:
+            obj = json.loads(line.decode("utf-8", errors="replace"))
+        except ValueError:
+            continue
+        if obj.get("event"):
+            continue
+        if obj.get("request_id") == rid:
+            return obj
+    return None
+
+
+def _fetch_media_info(pipe: str, timeout: float = 30.0) -> dict:
+    """轮询 mpv 的属性，直到拿到片名和编码、或超时。拿不到的键直接缺席。
+
+    顺序与放弃条件都有讲究：片名要等 ytdl_hook 解析完（实测 1~5 秒，慢的
+    时候更久），所以它只能等到超时；编码属性可能永久 unavailable（纯音频
+    没有视频轨），问满几次就算没有，否则一条音频要白等满整个超时。
+    """
+    wanted = ["media-title", "audio-codec", "video-codec"]
+    info, misses = {}, {}
+    deadline = time.time() + timeout
+    raw = None
+    try:
+        while raw is None:
+            try:
+                raw = open(_PIPE_PREFIX + pipe, "r+b", buffering=0)
+            except OSError:
+                if time.time() >= deadline:
+                    return info       # mpv 没建管道，放弃回填
+                time.sleep(0.1)       # 建管道有几十毫秒延迟
+        rd = io.BufferedReader(raw)
+        rid = 0
+        while wanted and time.time() < deadline:
+            prop = wanted[0]
+            rid += 1
+            r = _ipc_ask(raw, rd, prop, rid, deadline)
+            if r is None:
+                break
+            err = r.get("error")
+            if err == "success" and r.get("data"):
+                info[prop] = r["data"]
+                wanted.pop(0)
+            elif err != "property unavailable":
+                wanted.pop(0)         # 这个 mpv 不认该属性，别再问
+            elif prop != "media-title":
+                misses[prop] = misses.get(prop, 0) + 1
+                if misses[prop] >= 5:
+                    wanted.pop(0)     # 该轨不存在（如纯音频无视频编码）
+                else:
+                    time.sleep(0.4)
+            else:
+                time.sleep(0.4)       # 片名还没解析出来，继续等到超时
+    except Exception as e:
+        _log(f"[!] 读取 mpv 播放信息失败: {type(e).__name__}")
+    finally:
+        if raw is not None:
+            raw.close()
+    return info
+
+
+def _short(text: str, limit: int) -> str:
+    text = str(text or "").strip()
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _enrich_history(pipe: str, url: str, key: str):
+    """后台线程：把 mpv 解析出的片名/编码补回播放历史那一行。
+
+    失败就什么都不做 —— 历史里那行 URL 推导的标识已经是可用的。
+    """
+    info = _fetch_media_info(pipe)
+    title = str(info.get("media-title") or "")
+    if not title or title == url:
+        return
+    codecs = [str(info.get(p) or "").split(" ")[0] for p in ("video-codec", "audio-codec")]
+    codec = " + ".join(c for c in codecs if c)
+    detail = f"{_short(title, 26)} · {_short(codec, 14)}" if codec else _short(title, 26)
+    _ui_push({"key": key, "detail": detail}, "history_detail")
+    _log(f"[+] 播放信息：{title}" + (f" [{codec}]" if codec else ""))
+
+
 def _launch_mpv(url: str, mpv_path: str, ytdlp_path: str,
                 mpv_confdir: str, cookies_file: str, browser_cookie: str,
                 proxy: str):
@@ -833,6 +962,10 @@ def _launch_mpv(url: str, mpv_path: str, ytdlp_path: str,
     # 画质：最高分辨率（2160p）+ HDR/杜比 + 最高音质
     cmd.append("--ytdl-format=bestvideo[height<=2160]+bestaudio/bestvideo+bestaudio/best")
 
+    ipc_pipe = _mpv_ipc_pipe() if _mpv_supports_ipc(mpv_path) else ""
+    if ipc_pipe:
+        cmd.append(f"--input-ipc-server={ipc_pipe}")
+
     try:
         subprocess.Popen(
             cmd,
@@ -842,8 +975,15 @@ def _launch_mpv(url: str, mpv_path: str, ytdlp_path: str,
         )
     except FileNotFoundError:
         _log(f"[!] 找不到 mpv: {mpv_path}")
+        return
     except Exception as e:
         _log(f"[!] 拉起 mpv 失败: {e}")
+        return
+
+    if ipc_pipe:
+        threading.Thread(target=_enrich_history,
+                         args=(ipc_pipe, url, _history_key(url)),
+                         daemon=True).start()
 
 
 # ============================================================================
@@ -1028,6 +1168,9 @@ class _Window:
                 if kind == "login":
                     self.open_login(auto=True)
                     continue
+                if kind == "history_detail":
+                    self._apply_hist_detail(msg["key"], msg["detail"])
+                    continue
                 self._append(self.hist if kind == "history" else self.status, msg)
         except queue.Empty:
             pass
@@ -1039,6 +1182,25 @@ class _Window:
         box.insert("end", msg + "\n")
         box.see("end")
         box.configure(state="disabled")
+
+    def _apply_hist_detail(self, key: str, detail: str):
+        """把最近一条含 key 的历史行尾部换成片名 + 编码；找不到就不动。"""
+        box = self.hist
+        box.configure(state="normal")
+        try:
+            for row in range(int(box.index("end-1c").split(".")[0]), 0, -1):
+                line = box.get(f"{row}.0", f"{row}.0 lineend")
+                if key not in line:
+                    continue
+                base = re.sub(r"\s*→ mpv\s*$", "", line)
+                room = 58 - len(base) - len("  ·  ")
+                if room < 6:
+                    break                     # 塞不下就不改，保住原来那行
+                box.delete(f"{row}.0", f"{row}.0 lineend")
+                box.insert(f"{row}.0", f"{base}  ·  {_short(detail, room)}")
+                break
+        finally:
+            box.configure(state="disabled")
 
     def _clear_hist(self):
         box = self.hist
@@ -1172,15 +1334,19 @@ class _Window:
 # 主循环
 # ============================================================================
 
-def _history_line(url: str) -> str:
-    """播放历史的一行。标题和编码格式这里拿不到 —— 解析发生在 mpv 的
-    ytdl_hook 里，结果不回传本进程，只能报到站点和视频标识为止。"""
+def _history_key(url: str) -> str:
+    """播放历史一行的识别段，也是 IPC 回填时定位那一行的锚点。"""
     if "youtube.com" in url or "youtu.be" in url:
         m = YT_RE.search(url)
-        return f"[{time.strftime('%H:%M')}] YouTube {m.group(1) if m else url}  → mpv"
+        return f"YouTube {m.group(1) if m else url}"
     m = BV_RE.search(url)
     ident = m.group(0) if m else url.partition("?")[0].rstrip("/").rsplit("/", 1)[-1]
-    return f"[{time.strftime('%H:%M')}] B站 {ident}  → mpv"
+    return f"B站 {ident}"
+
+
+def _history_line(url: str) -> str:
+    """播放历史的一行。片名和编码在 mpv 侧解析，稍后由 _enrich_history 追写。"""
+    return f"[{time.strftime('%H:%M')}] {_history_key(url)}  → mpv"
 
 
 def _listen(mpv_path: str, ytdlp_path: str, mpv_confdir: str,
