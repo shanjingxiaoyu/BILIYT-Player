@@ -842,9 +842,10 @@ def _mpv_ipc_pipe() -> str:
 def _ipc_ask(raw, rd, prop: str, rid: int, deadline: float):
     """发一条 get_property，读到与 rid 配对的回应为止。
 
-    mpv 会把事件（start-file / audio-reconfig / file-loaded…）也推给这条连接，
-    事件行没有 request_id。不跳过它们的话，播放刚开始时会把事件当回应，
-    三个属性全被误判成“这个 mpv 不认”，回填就静默失效了。
+    mpv 会把事件（start-file / audio-reconfig / playback-restart…）也推给这条
+    连接，所以「读到一行就当回应」会把事件吃掉 —— 真正的守门是 rid 配对。
+    实测 v0.41.0-1107：一次播放推来的 6 条事件行全都不带 request_id，它们本来
+    也配不上；下面那句 event 判断是防呆，挡的是万一某个版本把 rid 也写进事件。
     """
     raw.write(json.dumps({"command": ["get_property", prop], "request_id": rid})
               .encode("utf-8") + b"\n")

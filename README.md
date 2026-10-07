@@ -192,6 +192,7 @@ python -m PyInstaller --noconfirm cb_to_mpv.spec
 | `cb_to_mpv.pyw` | 主程序：剪贴板监听 / 链接识别 / 短链解析 / 扫码登录 / 拉起 mpv |
 | `test_cookie_canary.py` | 硬约束守卫：Cookie 的值不许进 `cb_to_mpv.log`。本地 `python test_cookie_canary.py`，CI 的 lint job 已接入；不联网、不碰真的 `cookies.txt` |
 | `test_single_instance.py` | 重复启动守卫：已有实例时必须弹一次原生提示框，且不建第二个窗口、不起第二个监听线程。本地 `python test_single_instance.py`，CI 的 lint job 已接入；不弹真框、互斥体用测试专用名字 |
+| `test_ipc_ask.py` | 回填守卫：IPC 读取只认与自己 request_id 配对的回应，事件行一律不吃。本地 `python test_ipc_ask.py`，CI 的 lint job 已接入；不连真 mpv、不开真管道，桩件逐行喂预写 JSON |
 | `cb_to_mpv.spec` | PyInstaller 打包配置 |
 | `requirements.txt` | 唯一的第三方依赖（`qrcode`，扫码登录画二维码用） |
 | `config.template.ini` | 配置模板（全注释默认值），发布时改名为 `config.ini`；本机 `config.ini` 是运行时配置，不入库（已 gitignore） |
