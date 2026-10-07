@@ -41,6 +41,10 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    # 仓库默认的 GITHUB_TOKEN 是只读的：生成 Release notes 那个接口要写权限，
+    # 缺它就在最后一步 403 "Resource not accessible by integration"，前面全绿也白发不了版
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
