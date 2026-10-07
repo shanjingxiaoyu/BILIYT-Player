@@ -56,57 +56,32 @@ jobs:
           SAFE_DELETE_DISABLE: "1"
         run: python -m PyInstaller --noconfirm cb_to_mpv.spec
 
-      - name: 取 mpv 的 7z（多主机尝试 + 校验签名，绝不把 HTML 交给 7z）
+      - name: 取 mpv 的 7z（官方指 GitHub 构建，按 latest release 选资产并校验签名）
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $ErrorActionPreference = "Continue"
-          # 实测：runner 上 python urllib 请求 sourceforge.net 直接 403，
-          # 而 Invoke-WebRequest 能拿到 200 —— 只是 200 给的是下载中转页（104 KB HTML）。
-          # 所以这里用 IWR，但优先走 SourceForge 的脚本直连入口，并在解包前校验 7z 签名。
-          $UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-          $pinned = "mpv-x86_64-v3-20250223.7z"
-          $magic = "55,122,188,175,39,28"
-          $templates = @(
-            "https://downloads.sourceforge.net/mpv-player-windows/64bit-v3/{0}",
-            "https://master.dl.sourceforge.net/project/mpv-player-windows/64bit-v3/{0}",
-            "https://sourceforge.net/projects/mpv-player-windows/files/64bit-v3/{0}/download"
-          )
-
-          # 固定包名可能已被清理，先列目录，把现存的日期包按新到旧排在后面
-          $names = @($pinned)
-          foreach ($p in @("https://sourceforge.net/rest/p/mpv-player-windows/files/64bit-v3/",
-                           "https://sourceforge.net/projects/mpv-player-windows/files/64bit-v3/")) {
-            try {
-              $t = (Invoke-WebRequest -Uri $p -UserAgent $UA -TimeoutSec 120).Content
-              $found = [regex]::Matches("$t", 'mpv-x86_64-v3-\d{8}') |
-                       ForEach-Object { $_.Value } | Sort-Object -Unique -Descending
-              Write-Host "LIST $($p.Substring(0,60)) -> $($found -join ', ')"
-              foreach ($f in $found) { if ($names -notcontains "$f.7z") { $names += "$f.7z" } }
-            } catch { Write-Host "LIST MISS $p :: $($_.Exception.Message)" }
-          }
-
-          $ok = $false
-          foreach ($n in $names) {
-            if ($ok) { break }
-            foreach ($tpl in $templates) {
-              $u = $tpl -f $n
-              try {
-                Invoke-WebRequest -Uri $u -OutFile mpv.7z -UserAgent $UA -TimeoutSec 900
-              } catch { Write-Host "MISS $u :: $($_.Exception.Message)"; continue }
-              # 用 Get-Item 的 FullName 读，别让 .NET 的进程 CWD 和 pwsh 的位置不一致
-              $f = Get-Item "mpv.7z" -ErrorAction SilentlyContinue
-              if (-not $f) { Write-Host "NOFILE $u"; continue }
-              $sig = if ($f.Length -ge 6) {
-                ((Get-Content $f.FullName -AsByteStream -TotalCount 6) -join ',') -eq $magic
-              } else { $false }
-              if ($sig -and ($f.Length -gt 1MB)) {
-                Write-Host "HIT $u  $($f.Length) bytes"; $ok = $true; break
-              }
-              $head = -join ([char[]](Get-Content $f.FullName -AsByteStream -TotalCount 160))
-              Write-Host "NOT7Z $u  len=$($f.Length) head=$($head -replace '\s+', ' ')"
-            }
-          }
-          if (-not $ok) { Write-Error "no usable mpv 7z from any SourceForge path - fix the download source"; exit 1 }
+          $ErrorActionPreference = "Stop"
+          # mpv.io/installation 上 Windows 只有 GitHub 构建，SourceForge 那条线已不可用：
+          # 钉死的包名会被清理，而 SourceForge 对任何路径都回 JS 渲染的目录页（带浏览器 UA 直接 403），
+          # 把那份 104 KB HTML 交给 7z 就是 "Is not archive"。
+          # 所以这里只钉「latest release 里形如 mpv-x86_64-<日期> 的资产」，不钉文件名。
+          # 取基线 x86_64 而不是 v3：v3 要 AVX2，发布包得能在老机器上跑。
+          $repo = "zhongfly/mpv-winbuild"
+          $hdr = @{}
+          if ($env:GH_TOKEN) { $hdr["Authorization"] = "Bearer $env:GH_TOKEN" }
+          $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers $hdr -TimeoutSec 120
+          Write-Host "TAG $($rel.tag_name)  published $($rel.published_at)"
+          $assets = @($rel.assets | Where-Object { $_.name -match '^mpv-x86_64-\d{8}' } | Sort-Object name -Descending)
+          Write-Host "MATCHED $($assets.Count) -> $(($assets.name) -join ', ')"
+          if (-not $assets) { Write-Error "no x86_64 mpv asset in $repo latest release"; exit 1 }
+          $dst = Join-Path $PWD "mpv.7z"
+          Invoke-WebRequest -Uri $assets[0].browser_download_url -OutFile $dst -TimeoutSec 900
+          # 只认 7z 签名：下载源哪天再变成 HTML，就在这里停下，而不是让解包步骤去猜
+          $fi = Get-Item $dst
+          $magic = (Get-Content $fi.FullName -AsByteStream -TotalCount 6) -join ','
+          Write-Host "SAVED $($assets[0].name)  len=$($fi.Length)  magic=$magic"
+          if ($magic -ne "55,122,188,175,39,28" -or $fi.Length -lt 1MB) { Write-Error "mpv.7z is not a 7z archive"; exit 1 }
 
       - name: 解包 mpv + 取 yt-dlp + 便携配置
         shell: pwsh
