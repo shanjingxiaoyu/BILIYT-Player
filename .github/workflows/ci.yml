@@ -30,6 +30,10 @@ jobs:
       - name: Cookie 泄漏 canary 测试
         run: python test_cookie_canary.py
 
+      # 打包后没有控制台，重复启动的提示只能靠原生对话框；这里盯它真的被调
+      - name: 单实例提示测试
+        run: python test_single_instance.py
+
   # ── Release: 推 tag 时自动打包 EXE + 发布 ──
   release:
     if: startsWith(github.ref, 'refs/tags/v')
