@@ -7,6 +7,9 @@ on:
       - "v*"
   pull_request:
     branches: [main]
+  # 手动触发跑的是同一条 release 流水线，但最后一步不发版：
+  # 用它来验下载源、打包、发布目录完整性，不必为此先发布一个公开 Release
+  workflow_dispatch:
 
 jobs:
   # ── CI: 语法检查（push 到 main / cb-player，或 PR 到 main 时触发） ──
@@ -34,9 +37,9 @@ jobs:
       - name: 单实例提示测试
         run: python test_single_instance.py
 
-  # ── Release: 推 tag 时自动打包 EXE + 发布 ──
+  # ── Release: 推 tag 时自动打包 EXE + 发布；手动触发只打包不发版 ──
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,12 +56,64 @@ jobs:
           SAFE_DELETE_DISABLE: "1"
         run: python -m PyInstaller --noconfirm cb_to_mpv.spec
 
-      - name: 下载 mpv-portable + yt-dlp
+      - name: 取 mpv 的 7z（校验签名，固定包失效就回目录挑最新）
+        shell: python
+        run: |
+          import re, sys, urllib.request
+
+          FOLDER = "https://sourceforge.net/projects/mpv-player-windows/files/64bit-v3/"
+          PINNED = "mpv-x86_64-v3-20250223.7z"
+          # SourceForge 对非浏览器 UA 会发下载中转页，也可能因为包被清理而返回 HTML；
+          # 2026-10-08 那次 release job 就拿到了 104 KB 的 HTML，7z 报 Is not archive。
+          UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
+          MAGIC = b"7z\xbc\xaf\x27\x1c"
+
+
+          def fetch(url):
+              return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=180).read()
+
+
+          def try_name(name):
+              try:
+                  data = fetch(FOLDER + name + "/download")
+              except Exception as e:
+                  print(f"::warning::{name} 下载失败 {type(e).__name__} {e}")
+                  return None
+              if data[:6] != MAGIC:
+                  t = re.search(rb"<title>(.*?)</title>", data[:8000], re.S)
+                  print(f"::warning::{name} 拿到的不是 7z：{len(data)} 字节，"
+                        f"title={t.group(1).decode('utf-8', 'replace')[:90] if t else '无'}")
+                  return None
+              print(f"{name}：{len(data)} 字节，7z 签名正确")
+              return data
+
+
+          data = try_name(PINNED)
+          if data is None:
+              found = set()
+              for page in (FOLDER,
+                           "https://sourceforge.net/rest/p/mpv-player-windows/files/64bit-v3/"):
+                  try:
+                      txt = fetch(page).decode("utf-8", "replace")
+                  except Exception as e:
+                      print(f"::warning::目录页 {page} 取不到 {type(e).__name__} {e}")
+                      continue
+                  found |= set(re.findall(r"mpv-x86_64-v3-\d{8}", txt))
+              print("目录里现存：", sorted(found)[-12:] or "一个都没匹配到")
+              for name in sorted(found, reverse=True)[:6]:
+                  data = try_name(name + ".7z")
+                  if data:
+                      print("改用", name)
+                      break
+          if not data:
+              sys.exit("拿不到可用的 mpv 7z —— 下载源需要重新确认")
+          open("mpv.7z", "wb").write(data)
+
+      - name: 解包 mpv + 取 yt-dlp + 便携配置
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release\CB-to-MPV\mpv-portable | Out-Null
-          # mpv（含 d3dcompiler_43.dll + fonts.conf）
-          Invoke-WebRequest -Uri "https://sourceforge.net/projects/mpv-player-windows/files/64bit-v3/mpv-x86_64-v3-20250223.7z/download" -OutFile mpv.7z
           7z x mpv.7z -orelease\CB-to-MPV\mpv-portable -y
           Remove-Item mpv.7z
           # yt-dlp.exe（B 站 / YouTube 解析必需）
@@ -98,6 +153,7 @@ jobs:
         run: Compress-Archive -Path release\CB-to-MPV\* -DestinationPath release\CB-to-MPV.zip
 
       - name: 发布 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           name: "${{ github.ref_name }}"
