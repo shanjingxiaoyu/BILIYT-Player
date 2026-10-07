@@ -13,6 +13,14 @@ import tempfile
 import types
 from pathlib import Path
 
+# _log() 里的 print 走 sys.stdout；GitHub 的 windows runner 默认不是 UTF-8，
+# 中文日志会抛 UnicodeEncodeError。真程序打包后 console=False，print 是空操作，
+# 所以这里只纠测试自己的输出。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 for stub in ("tkinter", "tkinter.ttk", "tkinter.messagebox", "qrcode"):
     if stub not in sys.modules:
         m = types.ModuleType(stub)
