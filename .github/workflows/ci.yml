@@ -62,7 +62,8 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item dist\CB-to-MPV.exe release\CB-to-MPV\
-          Copy-Item config.ini release\CB-to-MPV\
+          # config.template.ini 是仓库内的配置模板，发布时改名为程序实际读取的 config.ini
+          Copy-Item config.template.ini release\CB-to-MPV\config.ini
           # cookies.template.txt 是仓库内的空模板，发布时改名为程序实际读取的 cookies.txt
           Copy-Item cookies.template.txt release\CB-to-MPV\cookies.txt
           Copy-Item README.md release\CB-to-MPV\

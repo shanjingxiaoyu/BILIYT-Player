@@ -91,7 +91,7 @@ python cb_to_mpv.pyw        # 无需 venv，无需 pip install
 
 ## 配置
 
-编辑 `config.ini`，全部为可选项，改完重启程序生效。
+编辑 `config.ini`，全部为可选项，改完重启程序生效。发布包里已带这个文件；源码运行时仓库里没有它（本机配置不入库），需要自定义就自己复制一份：`copy config.template.ini config.ini`——没有 `config.ini` 也能正常跑，程序走内置默认值。
 
 ```ini
 [paths]
@@ -181,7 +181,7 @@ python -m PyInstaller --noconfirm cb_to_mpv.spec
 
 体积几乎全是 tkinter 运行库（`tcl86t` + `tk86t` + `tcl/` 脚本，未压缩约 11.4MB）；唯一的第三方依赖 `qrcode` 只增加约 60KB。构建用的 Python **必须自带 tkinter**——精简版解释器（无 `tcl/` 目录）打包会直接失败。
 
-推 `v*` 格式的 tag 会触发 GitHub Actions：自动打包 exe、下载 mpv 与 yt-dlp、附带 `config.ini` 与 `cookies.txt` 模板、校验发布包完整性后发布 `CB-to-MPV.zip`。见 `.github/workflows/ci.yml`。
+推 `v*` 格式的 tag 会触发 GitHub Actions：自动打包 exe、下载 mpv 与 yt-dlp、把仓库内的 `config.template.ini` 与 `cookies.template.txt` 改名成 `config.ini` / `cookies.txt` 放进发布包、校验完整性后发布 `CB-to-MPV.zip`。见 `.github/workflows/ci.yml`。
 
 ---
 
@@ -192,7 +192,7 @@ python -m PyInstaller --noconfirm cb_to_mpv.spec
 | `cb_to_mpv.pyw` | 主程序：剪贴板监听 / 链接识别 / 短链解析 / 扫码登录 / 拉起 mpv |
 | `cb_to_mpv.spec` | PyInstaller 打包配置 |
 | `requirements.txt` | 唯一的第三方依赖（`qrcode`，扫码登录画二维码用） |
-| `config.ini` | 配置模板（仓库内为全注释默认值） |
+| `config.template.ini` | 配置模板（全注释默认值），发布时改名为 `config.ini`；本机 `config.ini` 是运行时配置，不入库（已 gitignore） |
 | `cookies.template.txt` | Cookie 空模板，发布时改名为 `cookies.txt` |
 | `mpv-portable/portable_config/` | mpv 配置（仓库内唯一保留的便携版内容） |
 | `dist_portable/` | 成品目录：exe + `mpv-portable/` + `config.ini` + `README.txt`，整目录拷走即用 |
