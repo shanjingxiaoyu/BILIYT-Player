@@ -934,10 +934,17 @@ def _extract_url(text: str) -> str | None:
 _MUTEX_NAME = "Local\\CB-to-MPV"
 _ERROR_ALREADY_EXISTS = 183
 
+_MB_OK = 0x0
+_MB_ICONWARNING = 0x30
+_MB_SETFRONT = 0x00040000
+
 _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.wintypes.BOOL,
                                    ctypes.wintypes.LPCWSTR]
 _kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
 _kernel32.GetLastError.restype = ctypes.wintypes.DWORD
+_user32.MessageBoxW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.LPCWSTR,
+                                ctypes.wintypes.LPCWSTR, ctypes.wintypes.UINT]
+_user32.MessageBoxW.restype = ctypes.c_int
 
 
 def _acquire_single_instance():
@@ -949,6 +956,16 @@ def _acquire_single_instance():
         _kernel32.CloseHandle(handle)
         return None
     return handle
+
+
+def _notify_already_running():
+    """用原生对话框，而不是窗口或日志：此时既没有 Tk 主窗口，也不能写日志。"""
+    _user32.MessageBoxW(
+        None,
+        "CB-to-MPV 已经在运行，剪贴板监听由先启动的那个窗口负责。\n"
+        "本次启动直接退出。",
+        "剪贴板直连播放器",
+        _MB_OK | _MB_ICONWARNING | _MB_SETFRONT)
 
 
 # ============================================================================
@@ -1256,6 +1273,7 @@ def main():
     if mutex is None:
         # 不能走 _log：日志以 "w" 打开，会截断正在运行那个实例的日志
         print("[*] 已有实例在运行，本次启动退出。")
+        _notify_already_running()
         return
 
     window = _Window()
