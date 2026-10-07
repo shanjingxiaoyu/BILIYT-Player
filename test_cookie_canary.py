@@ -40,6 +40,9 @@ SEED = re.sub(r"\W", "", Path(tempfile.mkdtemp()).name)
 C = {name: f"CANARY-{name}-{SEED}" for name in
      ("SESSDATA", "buvid3", "bili_jct")}
 
+# 桩件返回的账号 ID：必须是合成值。仓库是公开的，真实 mid 会把项目和账号连起来。
+FAKE_MID = 100000001
+
 
 def sandbox():
     tmp = Path(tempfile.mkdtemp())
@@ -64,7 +67,7 @@ def drive(ck):
 
     def fake_nav(cookie_header):
         seen.append(cookie_header)
-        return {"code": 0, "data": {"isLogin": True, "mid": 386179215, "vipStatus": 0}}
+        return {"code": 0, "data": {"isLogin": True, "mid": FAKE_MID, "vipStatus": 0}}
 
     real_nav, mod._query_nav = mod._query_nav, fake_nav
     try:
@@ -103,7 +106,7 @@ def main():
     # 2. 断言：日志干净，且不是空日志
     text = log_text(tmp)
     assert text.strip(), "日志是空的 —— 被测路径根本没写日志，断言不成立"
-    assert "mid=386179215" in text and "已登录" in text, "登录态探测结果没进日志"
+    assert f"mid={FAKE_MID}" in text and "已登录" in text, "登录态探测结果没进日志"
     check_no_canary("正常路径", text)
 
     # 3. 自检牙齿：故意泄漏一次，测试必须抓到
