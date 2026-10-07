@@ -1,0 +1,2 @@
+# 只有扫码登录用到：画二维码点阵。只用 get_matrix()，所以不需要 pillow / pypng。
+qrcode==8.2

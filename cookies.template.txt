@@ -1,0 +1,12 @@
+# B 站 / YouTube Cookie 文件
+#
+# 方法一（推荐）：运行程序，点主窗口「扫码登录 B 站」，手机确认后
+#                B 站登录凭据会自动写入本文件（cookies.txt）。
+# 方法二：在 config.ini 的 [cookies] 段设置 browser_cookie = edge
+#                （或 chrome / firefox / brave / opera），无需导出文件。
+# 方法三：安装浏览器插件 Get cookies.txt LOCALLY，登录 B 站 / YouTube 后
+#         导出内容粘贴到本文件（或直接替换本文件）。
+#
+# YouTube 只能走方法二/三；扫码只解决 B 站。
+# 留空则使用游客模式（B 站 1080P / YouTube 普通画质）。
+# 保存后下一次播放即生效，不用重启程序。

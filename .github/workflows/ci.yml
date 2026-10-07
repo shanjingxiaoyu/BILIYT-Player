@@ -9,7 +9,8 @@ on:
     branches: [main]
 
 jobs:
-  # ── CI: 代码检查（push/PR 到 main 时触发） ──
+  # ── CI: 语法检查（push/PR 到 main 时触发） ──
+  # 第三方依赖只有 qrcode（画二维码矩阵用），见 requirements.txt
   lint:
     if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
@@ -20,13 +21,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 安装依赖
-        run: pip install -r requirements.txt
-
       - name: 语法检查
         run: |
-          python -m py_compile bili_clipboard_dolby.py
-          python -m py_compile bili_yt_player.pyw
+          python -m py_compile cb_to_mpv.pyw
           echo "All syntax checks passed."
 
   # ── Release: 推 tag 时自动打包 EXE + 发布 ──
@@ -40,44 +37,62 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 安装依赖 + PyInstaller
-        run: |
-          pip install -r requirements.txt
-          pip install pyinstaller
+      - name: 安装 PyInstaller 与运行依赖
+        run: pip install pyinstaller -r requirements.txt
 
       - name: 打包 EXE
         env:
           SAFE_DELETE_DISABLE: "1"
-        run: python -m PyInstaller --noconfirm bili_yt_player.spec
+        run: python -m PyInstaller --noconfirm cb_to_mpv.spec
 
       - name: 下载 mpv-portable + yt-dlp
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path release\BILIYT-Player\mpv-portable | Out-Null
+          New-Item -ItemType Directory -Force -Path release\CB-to-MPV\mpv-portable | Out-Null
           # mpv（含 d3dcompiler_43.dll + fonts.conf）
           Invoke-WebRequest -Uri "https://sourceforge.net/projects/mpv-player-windows/files/64bit-v3/mpv-x86_64-v3-20250223.7z/download" -OutFile mpv.7z
-          7z x mpv.7z -orelease\BILIYT-Player\mpv-portable -y
+          7z x mpv.7z -orelease\CB-to-MPV\mpv-portable -y
           Remove-Item mpv.7z
-          # yt-dlp.exe（YouTube 播放必需）
-          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile release\BILIYT-Player\mpv-portable\yt-dlp.exe
+          # yt-dlp.exe（B 站 / YouTube 解析必需）
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile release\CB-to-MPV\mpv-portable\yt-dlp.exe
           # 便携 mpv 配置
-          Copy-Item -Recurse mpv-portable\portable_config release\BILIYT-Player\mpv-portable\
+          Copy-Item -Recurse mpv-portable\portable_config release\CB-to-MPV\mpv-portable\
 
       - name: 整理发布目录
         shell: pwsh
         run: |
-          Copy-Item dist\BILIYT-Player.exe release\BILIYT-Player\
-          Copy-Item README.md release\BILIYT-Player\
-          Copy-Item LICENSE release\BILIYT-Player\
+          Copy-Item dist\CB-to-MPV.exe release\CB-to-MPV\
+          Copy-Item config.ini release\CB-to-MPV\
+          # cookies.template.txt 是仓库内的空模板，发布时改名为程序实际读取的 cookies.txt
+          Copy-Item cookies.template.txt release\CB-to-MPV\cookies.txt
+          Copy-Item README.md release\CB-to-MPV\
+          Copy-Item LICENSE release\CB-to-MPV\
+
+      - name: 校验发布目录完整性
+        shell: pwsh
+        run: |
+          $required = @(
+            "release\CB-to-MPV\CB-to-MPV.exe",
+            "release\CB-to-MPV\config.ini",
+            "release\CB-to-MPV\cookies.txt",
+            "release\CB-to-MPV\README.md",
+            "release\CB-to-MPV\mpv-portable\mpv.exe",
+            "release\CB-to-MPV\mpv-portable\yt-dlp.exe",
+            "release\CB-to-MPV\mpv-portable\portable_config\mpv.conf",
+            "release\CB-to-MPV\mpv-portable\portable_config\input.conf"
+          )
+          $missing = $required | Where-Object { -not (Test-Path $_) }
+          if ($missing) { Write-Error "发布包缺少文件: $($missing -join ', ')"; exit 1 }
+          Write-Host "发布包完整性校验通过 ($($required.Count) 项)"
 
       - name: 打包 zip
-        run: Compress-Archive -Path release\BILIYT-Player\* -DestinationPath release\BILIYT-Player.zip
+        run: Compress-Archive -Path release\CB-to-MPV\* -DestinationPath release\CB-to-MPV.zip
 
       - name: 发布 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: "${{ github.ref_name }}"
-          files: release/BILIYT-Player.zip
+          files: release/CB-to-MPV.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

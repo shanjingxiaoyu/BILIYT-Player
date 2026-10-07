@@ -5,8 +5,12 @@ legacy/
 .env
 cookies.txt
 
+# 本机配置（含 mpv/yt-dlp 绝对路径，随 Releases 分发模板即可）
+config.ini
+
 # Python
 .venv/
+.venv-tk/
 __pycache__/
 *.pyc
 
@@ -38,6 +42,9 @@ mpv-portable/portable_config/watch_later/
 
 # 临时文件
 _*.py
+
+# 运行时日志（程序在自身目录生成，每次启动覆盖）
+*.log
 
 # PyInstaller spec（保留新版 spec）
 *.spec

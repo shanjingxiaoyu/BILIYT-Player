@@ -5,7 +5,10 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=["configparser"],
+    # qrcode 的图像插件（PIL / PNG）是运行期按 factory 名字动态导入的，
+    # 静态分析抓不到。我们只走 get_matrix() + Canvas 绘制，碰不到那些分支，
+    # 但把包本身收进来，否则打包版一按「扫码登录」就 ImportError。
+    hiddenimports=["configparser", "qrcode", "qrcode.image", "qrcode.constants"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
