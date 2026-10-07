@@ -2,14 +2,14 @@ name: CI & Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, cb-player]
     tags:
       - "v*"
   pull_request:
     branches: [main]
 
 jobs:
-  # ── CI: 语法检查（push/PR 到 main 时触发） ──
+  # ── CI: 语法检查（push 到 main / cb-player，或 PR 到 main 时触发） ──
   # 第三方依赖只有 qrcode（画二维码矩阵用），见 requirements.txt
   lint:
     if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/v')
