@@ -37,6 +37,10 @@ jobs:
       - name: 单实例提示测试
         run: python test_single_instance.py
 
+      # 播放历史的片名/编码回填：读错一行就静默失效，不报错，只能由测试盯
+      - name: IPC 回应配对测试
+        run: python test_ipc_ask.py
+
   # ── Release: 推 tag 时自动打包 EXE + 发布；手动触发只打包不发版 ──
   release:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
@@ -91,7 +95,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release\CB-to-MPV\mpv-portable | Out-Null
-          7z x mpv.7z -orelease\CB-to-MPV\mpv-portable -y
+          # 只解运行必需的三件。整包解会把上游附带的东西一起塞进便携包：
+          # doc/manual.pdf（1 MB 说明书）、installer/updater.ps1 + updater.bat（会改写用户 mpv 的更新器）、
+          # mpv-register.bat / mpv-unregister.bat（往注册表写文件关联）。本地实测这条选择式解包
+          # 只落 3 个文件，mpv.exe 仍是完整的 121,804,288 B。
+          # fonts.conf 留在 mpv\ 子目录不搬到根：上游安装版（Program Files\MPV Player）就是这个布局，
+          # 它根目录也没有第二份。
+          7z x mpv.7z -orelease\CB-to-MPV\mpv-portable -y mpv.exe mpv.com "mpv\fonts.conf"
           Remove-Item mpv.7z
           # yt-dlp.exe（B 站 / YouTube 解析必需）
           Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile release\CB-to-MPV\mpv-portable\yt-dlp.exe
@@ -125,6 +135,17 @@ jobs:
           $missing = $required | Where-Object { -not (Test-Path $_) }
           if ($missing) { Write-Error "发布包缺少文件: $($missing -join ', ')"; exit 1 }
           Write-Host "发布包完整性校验通过 ($($required.Count) 项)"
+          # 反向断言：上面那条选择式解包真的生效了，而不是又把上游附庸整个搬进来
+          $forbidden = @(
+            "release\CB-to-MPV\mpv-portable\doc\manual.pdf",
+            "release\CB-to-MPV\mpv-portable\installer\updater.ps1",
+            "release\CB-to-MPV\mpv-portable\updater.bat",
+            "release\CB-to-MPV\mpv-portable\mpv-register.bat",
+            "release\CB-to-MPV\mpv-portable\mpv-unregister.bat"
+          )
+          $found = $forbidden | Where-Object { Test-Path $_ }
+          if ($found) { Write-Error "发布包带了不该有的文件: $($found -join ', ')"; exit 1 }
+          Write-Host "不该带的文件一个都没有（查了 $($forbidden.Count) 项）"
 
       - name: 打包 zip
         run: Compress-Archive -Path release\CB-to-MPV\* -DestinationPath release\CB-to-MPV.zip
