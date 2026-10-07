@@ -26,6 +26,10 @@ jobs:
           python -m py_compile cb_to_mpv.pyw
           echo "All syntax checks passed."
 
+      # 硬约束：Cookie 的值不许进 cb_to_mpv.log。测试自带桩件，不联网、不装依赖
+      - name: Cookie 泄漏 canary 测试
+        run: python test_cookie_canary.py
+
   # ── Release: 推 tag 时自动打包 EXE + 发布 ──
   release:
     if: startsWith(github.ref, 'refs/tags/v')
