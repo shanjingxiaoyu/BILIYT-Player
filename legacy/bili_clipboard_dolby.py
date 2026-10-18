@@ -343,7 +343,11 @@ class _FastBiliSession:
         path = url.split(".com", 1)[1] if ".com" in url else url
         if params:
             path += "?" + urlencode(params)
-        return _FastResponse(_fast_bili_api(path, self._cookies.get("SESSDATA", ""), headers or {}))
+        # timeout 必须透传：调用方（playurl=15s 等）的预算曾经被静默丢弃
+        return _FastResponse(_fast_bili_api(
+            path, self._cookies.get("SESSDATA", ""), headers or {},
+            timeout=timeout if timeout else 10,
+        ))
 
     @property
     def cookies(self):
@@ -366,61 +370,97 @@ class _FastResponse:
 
 
 def _fast_https_request(host: str, path: str, cookie: str = "",
-                        extra_headers: dict = None, timeout: float = 10) -> tuple[str, bytes]:
+                        extra_headers: dict = None, timeout: float = 10,
+                        retries: int = 1) -> tuple[str, bytes]:
     """裸 socket HTTPS GET —— 绕过 urllib3/requests 的代理探测开销。
        支持任意 host（api.bilibili.com / passport.bilibili.com 等）。
        返回 (header_text, body_bytes)：header_text 完整保留，调用方可用
        正则提取 Set-Cookie（扫码登录需要）等头字段。
        本机 requests 库有链路问题（24s），裸 socket 100ms。
+
+       超时语义（2026-10-19 修）：连接/读取 stall 一律抛 TimeoutError，
+       不再静默返回截断 body（截断会让 json.loads 报难懂的错）。
+       瞬时 stall 自动重试 retries 次；连接失败时轮换 getaddrinfo 地址。
     """
+    import socket, ssl, time as _time
+
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return _fast_https_once(host, path, cookie, extra_headers, timeout)
+        except (socket.timeout, TimeoutError) as e:
+            last_err = e
+            continue
+    raise TimeoutError(f"B站 API 请求超时（{timeout}s × {retries + 1} 次）: {host}")
+
+
+def _fast_https_once(host: str, path: str, cookie: str = "",
+                     extra_headers: dict = None, timeout: float = 10) -> tuple[str, bytes]:
     import socket, ssl, time as _time
 
     port = 443
     deadline = _time.monotonic() + timeout  # 总体超时，防止慢速 trickle 累积
 
-    # DNS + TCP
+    # DNS + TCP（连接失败/超时时轮换地址，避开偶发的坏 IP）
     addrs = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
-    ip = addrs[0][4][0]
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    sock.connect((ip, port))
-
-    # TLS
-    ctx = ssl.create_default_context()
-    tls = ctx.wrap_socket(sock, server_hostname=host)
-
-    # HTTP GET
-    extra = ""
-    if extra_headers:
-        for k, v in extra_headers.items():
-            extra += f"{k}: {v}\r\n"
-    req = (
-        f"GET {path} HTTP/1.1\r\n"
-        f"Host: {host}\r\n"
-        f"User-Agent: {UA}\r\n"
-        + extra +
-        "Accept: application/json\r\n"
-        + (f"Cookie: {cookie}\r\n" if cookie else "") +
-        "Connection: close\r\n"
-        "\r\n"
-    ).encode()
-    tls.sendall(req)
-
-    # 读响应（带总体超时）
-    data = b""
-    while True:
-        remaining = deadline - _time.monotonic()
-        if remaining <= 0:
-            break
-        tls.settimeout(remaining)
+    sock = None
+    last_connect_err = None
+    for addr in addrs[:3]:
         try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect(addr[4])
+            break
+        except (socket.timeout, TimeoutError):
+            last_connect_err = TimeoutError(f"连接 {host} 超时")
+            sock.close()
+            sock = None
+        except OSError as e:
+            last_connect_err = e
+            sock.close()
+            sock = None
+    if sock is None:
+        raise last_connect_err or OSError(f"无法连接 {host}")
+
+    try:
+        # TLS
+        tls = None
+        ctx = ssl.create_default_context()
+        tls = ctx.wrap_socket(sock, server_hostname=host)
+
+        # HTTP GET
+        extra = ""
+        if extra_headers:
+            for k, v in extra_headers.items():
+                extra += f"{k}: {v}\r\n"
+        req = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"User-Agent: {UA}\r\n"
+            + extra +
+            "Accept: application/json\r\n"
+            + (f"Cookie: {cookie}\r\n" if cookie else "") +
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode()
+        tls.sendall(req)
+
+        # 读响应（带总体超时）
+        data = b""
+        while True:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"读取 {host} 响应超时")
+            tls.settimeout(remaining)
             chunk = tls.recv(8192)
             if not chunk:
                 break
             data += chunk
+    finally:
+        try:
+            tls.close()
         except Exception:
-            break
-    tls.close()
+            pass
 
     # 解析 body（支持 chunked transfer-encoding）
     header_end = data.find(b"\r\n\r\n")
@@ -452,7 +492,8 @@ def _fast_https_request(host: str, path: str, cookie: str = "",
     return header_text, body
 
 
-def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None) -> dict:
+def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None,
+                   timeout: float = 10) -> dict:
     """裸 socket HTTPS 请求 —— 绕过 urllib3/requests 的代理探测开销。
        本机 requests 库有链路问题（24s），裸 socket 100ms。仅用于 B站 API。
        保留原签名/原返回类型（dict），所有调用方无需改动。
@@ -461,7 +502,7 @@ def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None) ->
         "api.bilibili.com", path,
         cookie=f"SESSDATA={sessdata}" if sessdata else "",
         extra_headers=extra_headers,
-        timeout=5,
+        timeout=timeout,
     )
     return json.loads(body)
 
