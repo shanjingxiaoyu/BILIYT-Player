@@ -17,7 +17,7 @@ import queue
 import threading
 import tkinter as tk
 from collections import deque
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, filedialog
 from pathlib import Path
 from datetime import datetime
 import subprocess as sp
@@ -69,128 +69,13 @@ ENV_PATH = _CONFIG_DIR / ".env"
 BV_RE = re.compile(r"(BV[a-zA-Z0-9]{10})")
 YT_RE = re.compile(r"(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)([a-zA-Z0-9_-]{11})")
 EP_RE = re.compile(r"/ep(\d+)")
+P_PARAM_RE = re.compile(r"[?&]p=(\d+)")  # 分 P 参数
 
 
 # =============================================================================
-# 浏览器配置页（替代 tkinter 弹框）
+# 扫码登录（QR）— 替代手工凭证与浏览器 HTML 配置页
+# 具体实现见 App._qr_login_window / App._draw_qr_canvas
 # =============================================================================
-
-_CONFIG_HTML = r"""<!DOCTYPE html>
-<html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>配置 SESSDATA</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:"Microsoft YaHei",sans-serif;background:#f0f2f5;display:flex;justify-content:center;align-items:center;min-height:100vh}
-.card{background:#fff;border-radius:12px;padding:32px 28px;width:420px;box-shadow:0 4px 24px rgba(0,0,0,.08)}
-h2{font-size:18px;margin-bottom:6px;color:#1a1a1a}
-.desc{font-size:13px;color:#666;line-height:1.8;margin-bottom:16px}
-.desc b{color:#0078d4}
-input{width:100%;padding:10px 12px;font-size:13px;border:1px solid #d0d5dd;border-radius:6px;outline:none;font-family:monospace}
-input:focus{border-color:#0078d4;box-shadow:0 0 0 3px rgba(0,120,212,.1)}
-.btn{width:100%;padding:10px;margin-top:12px;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;color:#fff;background:#0078d4}
-.btn:hover{background:#106ebe}
-.msg{margin-top:10px;font-size:12px;text-align:center}
-.msg.ok{color:#107c10}
-.msg.err{color:#d83b01}
-</style></head><body>
-<div class="card">
-<h2>首次配置 — B 站 SESSDATA</h2>
-<div class="desc">
-<b>浏览器登录 bilibili.com</b> → F12 → Application → Cookies → <br>
-www.bilibili.com → 找到 <b>SESSDATA</b> → 双击 Value 复制 → 粘贴到下方
-</div>
-<input id="sd" type="password" placeholder="粘贴 SESSDATA 到这里…" autofocus>
-<button class="btn" onclick="submit()">保存并启动</button>
-<div id="msg" class="msg"></div>
-</div>
-<script>
-async function submit(){
-  const val=document.getElementById('sd').value.trim();
-  if(!val){document.getElementById('msg').className='msg err';document.getElementById('msg').textContent='请粘贴 SESSDATA';return}
-  try{
-    const r=await fetch('/save?sessdata='+encodeURIComponent(val));
-    if(r.ok){document.getElementById('msg').className='msg ok';document.getElementById('msg').textContent='已保存！窗口即将关闭…';setTimeout(()=>{window.close()},800)}
-    else{const t=await r.text();document.getElementById('msg').className='msg err';document.getElementById('msg').textContent='失败: '+t}
-  }catch(e){document.getElementById('msg').className='msg err';document.getElementById('msg').textContent='连接失败，请刷新重试'}
-}
-</script>
-</body></html>"""
-
-
-def _web_sessdata_input(env_path: Path) -> str | None:
-    """启动临时 HTTP 服务 → 浏览器打开配置页 → 等待用户提交 → 保存 .env → 返回 SESSDATA。"""
-    import webbrowser
-    import json
-    import socket
-    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-    from urllib.parse import urlparse, parse_qs
-
-    result = {"value": None, "done": False}
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            path = urlparse(self.path).path
-            if path == "/" or path == "/index.html":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(_CONFIG_HTML.encode())
-            elif path == "/save":
-                qs = parse_qs(urlparse(self.path).query)
-                sd = qs.get("sessdata", [""])[0].strip().strip("\"'")
-                if sd:
-                    env_path.write_text(f"# B 站登录态 Cookie\nSESSDATA={sd}\n", encoding="utf-8")
-                    result["value"] = sd
-                    result["done"] = True
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/plain; charset=utf-8")
-                    self.end_headers()
-                    self.wfile.write(b"OK")
-                else:
-                    self.send_response(400)
-                    self.end_headers()
-                    self.wfile.write(b"empty")
-            else:
-                self.send_response(404)
-                self.end_headers()
-
-        def log_message(self, *args):
-            pass  # 静默 HTTP 日志
-
-    # 检测端口可用性，被占用则自动选下一个
-    port = 18921
-    for _offset in range(10):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.bind(("127.0.0.1", port))
-            sock.close()
-            break
-        except OSError:
-            port += 1
-            sock.close()
-    else:
-        print("[!] 无法绑定 HTTP 端口 (18921-18930 均被占用)。", flush=True)
-        return None
-
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-
-    webbrowser.open(f"http://127.0.0.1:{port}")
-    print(f"[*] 已打开浏览器配置页面 (端口 {port})，请在页面中粘贴 SESSDATA。", flush=True)
-
-    # 轮询等待用户提交,120 秒超时防止无限阻塞
-    deadline = time.time() + 120
-    while not result["done"]:
-        if time.time() > deadline:
-            server.shutdown()
-            print("[!] SESSDATA 输入超时。", flush=True)
-            return None
-        time.sleep(0.3)
-
-    server.shutdown()
-    print("[+] SESSDATA 已保存。", flush=True)
-    return result["value"]
 
 
 class App:
@@ -219,8 +104,8 @@ class App:
         self._build_ui()
 
         if not self.sessdata:
-            # 无 SESSDATA → 浏览器弹 HTML 配置页
-            self.sessdata = _web_sessdata_input(ENV_PATH)
+            # 无 SESSDATA → 弹窗扫码登录（阻塞主线程直到完成/取消）
+            self.sessdata = self._qr_login_window()
             if not self.sessdata:
                 self.root.destroy()
                 sys.exit(0)
@@ -303,54 +188,67 @@ class App:
         self.hist_text.delete("1.0", "end")
         self.hist_text.configure(state="disabled")
 
-    # ---------- SESSDATA 输入页 ----------
-    def _show_sessdata_page(self):
+    # ---------- SESSDATA 扫码登录 ----------
+    def _qr_login_window(self) -> str | None:
+        """弹窗显示 B 站登录二维码，后台线程轮询扫码。返回 SESSDATA 或 None。"""
+        from bili_clipboard_dolby import qr_login_sessdata
+
+        result = {"sessdata": None}
+        cancel_evt = threading.Event()
+
         win = tk.Toplevel(self.root)
-        win.title("首次配置")
-        win.geometry("450x280")
+        win.title("B 站扫码登录")
+        win.geometry("340x440")
         win.resizable(False, False)
         win.transient(self.root)
         win.grab_set()
-        win.protocol("WM_DELETE_WINDOW", self._quit)
+        win.protocol("WM_DELETE_WINDOW", lambda: cancel_evt.set())
 
+        canvas = tk.Canvas(win, width=290, height=290, bg="white", highlightthickness=0)
+        canvas.pack(pady=(20, 8))
+
+        status_lbl = ttk.Label(win, text="正在获取二维码…", font=("Microsoft YaHei", 10, "bold"))
+        status_lbl.pack(pady=(0, 4))
         ttk.Label(
-            win, text="首次使用，请输入 B 站 SESSDATA",
-            font=("Microsoft YaHei", 11, "bold"),
-        ).pack(pady=(15, 5))
+            win, text="使用 B 站 App「扫一扫」，在手机上确认登录",
+            foreground="#888", font=("Microsoft YaHei", 9),
+        ).pack(pady=(0, 14))
+        ttk.Button(win, text="取消", command=lambda: cancel_evt.set()).pack(pady=(0, 16))
 
-        ttk.Label(
-            win,
-            text=(
-                "浏览器登录 bilibili.com\n"
-                "按 F12 → Application → Cookies → www.bilibili.com\n"
-                "找到 SESSDATA，复制 Value 粘贴到下方"
-            ),
-            justify="left",
-        ).pack(pady=(0, 10))
+        def draw(matrix):
+            self.root.after(0, lambda: self._draw_qr_canvas(canvas, matrix))
 
-        entry = ttk.Entry(win, width=50, show="*")
-        entry.pack(pady=5)
+        def on_status(msg):
+            self.root.after(0, lambda: status_lbl.configure(text=msg))
 
-        def save():
-            val = entry.get().strip().strip("\"'")
-            if not val:
-                messagebox.showwarning("提示", "请输入 SESSDATA")
-                return
-            ENV_PATH.write_text(
-                "# B 站登录态 Cookie\nSESSDATA=" + val + "\n",
-                encoding="utf-8",
+        def run():
+            sd = qr_login_sessdata(
+                emit=self._log, draw_qr=draw, on_status=on_status, cancel=cancel_evt,
             )
-            self.sessdata = val
-            win.destroy()
-            self._show_status_page()
-            self.start_monitor()
+            result["sessdata"] = sd
+            self.root.after(0, win.destroy)
 
-        ttk.Button(win, text="保存并启动", command=save).pack(pady=(10, 5))
-        ttk.Button(win, text="退出", command=self._quit).pack()
+        threading.Thread(target=run, daemon=True).start()
+        self.root.wait_window(win)  # 主线程局部事件循环，阻塞至扫码完成/取消
+        return result["sessdata"]
 
-        self.root.withdraw()
-        win.wait_window()
-        self.root.deiconify()
+    @staticmethod
+    def _draw_qr_canvas(canvas, matrix):
+        """把 qrcode 矩阵画到 tkinter Canvas（不依赖 PIL）。"""
+        canvas.delete("all")
+        n = len(matrix)
+        if n <= 0:
+            return
+        cell = 280 // n
+        off = (290 - cell * n) // 2
+        for y, row in enumerate(matrix):
+            for x, v in enumerate(row):
+                if v:
+                    canvas.create_rectangle(
+                        off + x * cell, off + y * cell,
+                        off + (x + 1) * cell, off + (y + 1) * cell,
+                        fill="black", outline="",
+                    )
 
     # ---------- 后端初始化 ----------
     def _show_status_page(self):
@@ -395,10 +293,21 @@ class App:
             self._log("[+] B 站鉴权就绪。")
         except Exception as e:
             self._log(f"[!] B 站鉴权失败: {e}")
-            self._log("[*] SESSDATA 已过期，正在打开浏览器重新登录…")
+            self._log("[*] SESSDATA 已过期，正在弹出扫码登录…")
             ENV_PATH.unlink(missing_ok=True)
-            self.sessdata = _web_sessdata_input(ENV_PATH)
+            # 弹窗必须在主线程，后台线程等待结果
+            done = threading.Event()
+            holder = {}
+
+            def do_login():
+                holder["sd"] = self._qr_login_window()
+                done.set()
+
+            self.root.after(0, do_login)
+            done.wait(timeout=240)  # 最多等 4 分钟（二维码有效期 + 轮询超时）
+            self.sessdata = holder.get("sd")
             if not self.sessdata:
+                self._log("[!] 扫码登录未完成。")
                 self.root.after(0, self._quit)
                 return
             try:
@@ -444,11 +353,16 @@ class App:
             self._log("[*] 已恢复监听。")
 
     def _match_link(self, text: str):
-        """从剪贴板文本中匹配链接，返回 (type, raw_id) 或 None。"""
+        """从剪贴板文本中匹配链接，返回 (type, raw_id, extra) 或 None。
+        extra: bili 类型为分 P 参数（默认 1），其余类型为 None。"""
         for pattern, type_name in self._LINK_PATTERNS:
             m = pattern.search(text)
             if m:
-                return (type_name, m.group(1))
+                if type_name == "bili":
+                    pm = P_PARAM_RE.search(text)
+                    p = int(pm.group(1)) if pm else 1
+                    return (type_name, m.group(1), p)
+                return (type_name, m.group(1), None)
         return None
 
     def _monitor_loop(self):
@@ -460,11 +374,15 @@ class App:
             text = _read_clipboard()
             result = self._match_link(text)
             if result:
-                _type, raw_id = result
-                dedup_key = f"{_type}:{raw_id}"
+                _type, raw_id, extra = result
+                # 去重键：B 站升级为 {bvid}_p{p}，避免切换分 P 被误拦截
+                if _type == "bili":
+                    dedup_key = f"bili:{raw_id}_p{extra}"
+                else:
+                    dedup_key = f"{_type}:{raw_id}"
                 if dedup_key not in self.recent_ids:
                     self.recent_ids.append(dedup_key)
-                    self.task_queue.put((_type, raw_id))
+                    self.task_queue.put((_type, raw_id, extra))
             time.sleep(0.3)
 
     def _worker_loop(self):
@@ -481,11 +399,11 @@ class App:
             self._process_task(task)
 
     def _process_task(self, task):
-        _type, raw_id = task
+        _type, raw_id, extra = task
         try:
             if _type == "bili":
-                self._log(f">> B 站: {raw_id}")
-                self._play_bili(raw_id)
+                self._log(f">> B 站: {raw_id}" + (f" (P{extra})" if extra else ""))
+                self._play_bili(raw_id, extra or 1)
             elif _type == "yt":
                 self._log(f">> YouTube: {raw_id}")
                 self._play_yt(raw_id)
@@ -502,22 +420,46 @@ class App:
             self._log(f"  [!] {e}")
 
     # ---------- 播放 ----------
-    def _play_bili(self, bvid):
-        from bili_clipboard_dolby import get_cid, get_playurl, pick_dolby_streams, launch_player
-        cid, title = get_cid(self.session, bvid)
+    def _play_bili(self, bvid, p=1):
+        from bili_clipboard_dolby import (get_cid_and_title, get_playurl,
+                                          pick_dolby_streams, launch_player,
+                                          fetch_episode_list, set_episode_state)
+        cid, title = get_cid_and_title(self.session, bvid, p=p)
+        # 维护剧集列表供 MPV 内部切集（Ctrl+←→ + 播完自动下一集）
+        try:
+            eps = fetch_episode_list(self.session, "bili", bvid)
+            index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
+            set_episode_state(eps, index, {
+                "session": self.session, "img_key": self.img_key,
+                "sub_key": self.sub_key, "sessdata": self.sessdata,
+            })
+            self._log(f"  [*] 剧集列表 {len(eps)} 集，当前第 {index + 1} 集")
+        except Exception as e:
+            self._log(f"  [!] 剧集列表获取失败，自动连播不可用: {e}")
         data = get_playurl(self.session, bvid, cid, self.img_key, self.sub_key)
         dash = data.get("dash")
         if not dash:
             self._log("  [!] 无 DASH 数据")
             return
         vurl, aurl, vd, ad = pick_dolby_streams(dash)
-        self._add_history("B站", bvid, title, vd, ad or "普通音频")
+        self._add_history("B站", f"{bvid}_p{p}", title, vd, ad or "普通音频")
         launch_player(self.player_path, vurl, title, audio_url=aurl, sessdata=self.sessdata, log=self._log)
 
     def _play_episode(self, ep_id: int):
-        from bili_clipboard_dolby import get_playurl, pick_dolby_streams, launch_player, resolve_episode
+        from bili_clipboard_dolby import (get_playurl, pick_dolby_streams,
+                                          launch_player, resolve_episode,
+                                          fetch_episode_list, set_episode_state)
         bvid, cid, full_title = resolve_episode(self.session, ep_id)
         self._log(f"  [+] {full_title} (BV={bvid})")
+        try:
+            eps = fetch_episode_list(self.session, "ep", ep_id)
+            index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
+            set_episode_state(eps, index, {
+                "session": self.session, "img_key": self.img_key,
+                "sub_key": self.sub_key, "sessdata": self.sessdata,
+            })
+        except Exception:
+            pass
         data = get_playurl(self.session, bvid, cid, self.img_key, self.sub_key)
         dash = data.get("dash")
         if not dash:
@@ -537,9 +479,20 @@ class App:
             self._log(f"    [!] YT launch 失败: {e}")
 
     def _play_ss(self, ss_id: int):
-        from bili_clipboard_dolby import get_playurl, pick_dolby_streams, launch_player, resolve_ss
+        from bili_clipboard_dolby import (get_playurl, pick_dolby_streams,
+                                          launch_player, resolve_ss,
+                                          fetch_episode_list, set_episode_state)
         bvid, cid, full_title = resolve_ss(self.session, ss_id)
         self._log(f"  [+] {full_title} (BV={bvid})")
+        try:
+            eps = fetch_episode_list(self.session, "ss", ss_id)
+            index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
+            set_episode_state(eps, index, {
+                "session": self.session, "img_key": self.img_key,
+                "sub_key": self.sub_key, "sessdata": self.sessdata,
+            })
+        except Exception:
+            pass
         data = get_playurl(self.session, bvid, cid, self.img_key, self.sub_key)
         dash = data.get("dash")
         if not dash:

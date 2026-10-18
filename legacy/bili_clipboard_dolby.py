@@ -19,7 +19,9 @@ import re
 import time
 import json
 import atexit
+import socket
 import hashlib
+import threading
 import subprocess
 import urllib.parse
 from functools import reduce
@@ -94,6 +96,7 @@ if not getattr(sys, "frozen", False):
     _install("requests")
     _install("python-dotenv", "dotenv")
     _install("pyperclip")
+    _install("qrcode")
 
 
 import requests                  # noqa: E402
@@ -128,50 +131,181 @@ YT_RE = re.compile(r"(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)([a-zA-Z0-
 EP_RE = re.compile(r"/ep(\d+)")
 SS_RE = re.compile(r"/ss(\d+)")
 BANGUMI_MD_RE = re.compile(r"/md(\d+)")
+P_PARAM_RE = re.compile(r"[?&]p=(\d+)")  # 分 P 参数
+
+# 视频编码权重：AV1(codecid=13) 绝对优先 > HEVC/H.265(12) > AVC/H.264(7)
+CODEC_WEIGHT = {13: 3, 12: 2, 7: 1}
 
 
 
 # ============================================================================
-# 2. SESSDATA 读取（首次弹框输入，后续从 .env 读取）
+# 2. SESSDATA 读取（QR 扫码登录，替代手工凭证）
 # ============================================================================
+
+def qr_login_sessdata(emit=None, draw_qr=None, on_status=None,
+                      cancel=None, timeout: float = 180) -> str | None:
+    """B 站官方扫码登录。
+
+    流程:
+      generate 申请二维码 → 终端 ASCII 二维码（可同时交给 GUI 绘制）→
+      轮询 poll 直到授权成功 → 从 Set-Cookie 提取 SESSDATA → 保存到 .env。
+
+    参数:
+      emit:      日志回调（GUI 传入 self._log，终端走 print）
+      draw_qr:   二维码矩阵回调 (matrix)，GUI 用它绘制 Canvas
+      on_status: 状态文案回调（"请扫码"/"已扫码待确认"/"成功"）
+      cancel:    threading.Event，置位则中止轮询（GUI 取消按钮）
+      timeout:   轮询超时秒数
+
+    返回 SESSDATA 或 None（失败/取消/超时）。
+    """
+    import qrcode as _qrcode  # noqa: E402 — 懒加载，纯终端场景也可用
+
+    def _emit(msg):
+        if emit:
+            try:
+                emit(msg)
+            except Exception:
+                pass
+        print(msg, flush=True)
+
+    # 1) 申请二维码
+    _emit("[*] 正在申请 B 站登录二维码…")
+    try:
+        gen_header, gen_body = _fast_https_request(
+            "passport.bilibili.com",
+            "/x/passport-login/web/qrcode/generate",
+            timeout=10,
+        )
+    except Exception as e:
+        _emit(f"[!] 二维码申请失败: {e}")
+        return None
+
+    try:
+        gen = json.loads(gen_body)
+    except Exception:
+        _emit("[!] 二维码接口返回异常")
+        return None
+
+    if gen.get("code") != 0:
+        _emit(f"[!] 二维码申请失败: {gen.get('message')}")
+        return None
+
+    qr_url = gen["data"]["url"]
+    qr_key = gen["data"]["qrcode_key"]
+
+    # 提取 generate 的 Set-Cookie（buvid3 等，poll 需要携带）
+    cookie_str = ""
+    for m in re.finditer(r"^Set-Cookie:\s*([^;]+)=([^;]+)", gen_header, re.I | re.M):
+        if m.group(1).strip().lower() == "buvid3":
+            cookie_str = f"{m.group(1)}={m.group(2)}"
+            break
+
+    # 2) 展示二维码（终端 ASCII + 可选 GUI 绘制）
+    qr = _qrcode.QRCode(border=1)
+    qr.add_data(qr_url)
+    qr.make(fit=True)
+
+    _emit("[*] 请用 B 站 App 扫码登录：")
+    try:
+        qr.print_ascii(invert=True)  # 终端 ASCII 二维码
+    except Exception:
+        pass
+    if draw_qr:
+        try:
+            draw_qr(qr.modules)
+        except Exception:
+            pass
+    if on_status:
+        try:
+            on_status("请用 B 站 App 扫码登录")
+        except Exception:
+            pass
+
+    # 3) 轮询 poll 直到授权成功
+    poll_path = "/x/passport-login/web/qrcode/poll?qrcode_key=" + qr_key
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        if cancel is not None and cancel.is_set():
+            _emit("[!] 已取消扫码登录。")
+            return None
+
+        try:
+            poll_header, poll_body = _fast_https_request(
+                "passport.bilibili.com", poll_path,
+                cookie=cookie_str, timeout=10,
+            )
+            pj = json.loads(poll_body)
+        except Exception as e:
+            _emit(f"[!] poll 请求失败: {e}，重试…")
+            time.sleep(2)
+            continue
+
+        data = pj.get("data") or {}
+        code = data.get("code", -1)
+
+        if code == 0:  # 登录成功
+            # 从 Set-Cookie 提取 SESSDATA
+            sessdata = ""
+            for m in re.finditer(r"^Set-Cookie:\s*SESSDATA=([^;]+)", poll_header, re.I | re.M):
+                sessdata = m.group(1)
+                break
+            if not sessdata:
+                # 兜底：部分网关把 SESSDATA 放在 data.url 的 query 里
+                m = re.search(r"[?&]SESSDATA=([^;&]+)", data.get("url", ""))
+                if m:
+                    sessdata = m.group(1)
+
+            if not sessdata:
+                _emit("[!] 登录成功但未解析到 SESSDATA，请重试。")
+                return None
+
+            ENV_PATH.write_text(
+                "# B 站登录态 Cookie — 扫码登录自动保存，请勿分享。\n"
+                "SESSDATA=" + sessdata + "\n",
+                encoding="utf-8",
+            )
+            _emit("[+] 扫码登录成功，SESSDATA 已保存到 .env。")
+            if on_status:
+                try:
+                    on_status("登录成功！")
+                except Exception:
+                    pass
+            return sessdata
+
+        elif code == 86038:  # 二维码失效
+            _emit("[!] 二维码已失效，请重新运行程序再扫一次。")
+            return None
+        elif code == 86090:  # 已扫码，待确认
+            if on_status:
+                try:
+                    on_status("已扫码，请在手机上确认…")
+                except Exception:
+                    pass
+            _emit("[*] 已扫码，请在手机上点击确认…")
+        elif code == 86101:  # 未扫码
+            pass  # 继续轮询，不刷屏
+
+        time.sleep(2)
+
+    _emit("[!] 扫码超时。")
+    return None
+
 
 def load_sessdata() -> str:
-    # 已配置过 → 直接读
+    """读取 SESSDATA：已配置则读 .env；缺失/失效则启动 QR 扫码登录。"""
     if ENV_PATH.exists():
         load_dotenv(ENV_PATH)
         sessdata = os.getenv("SESSDATA", "").strip()
         if sessdata:
             return sessdata
 
-    # 首次运行 → 弹输入框
-    import tkinter as tk
-    from tkinter import simpledialog
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-
-    sessdata = simpledialog.askstring(
-        "B 站 SESSDATA",
-        "首次使用，请粘贴 B 站 SESSDATA Cookie 值：\n\n"
-        "获取方法：浏览器登录 bilibili.com → F12\n"
-        "→ Application → Cookies → www.bilibili.com\n"
-        "→ 复制 SESSDATA 的 Value  → 粘贴到此框",
-        parent=root,
-    )
-    root.destroy()
-
-    if not sessdata or not sessdata.strip():
-        print("[!] 未输入 SESSDATA，已取消。", flush=True)
+    print("[*] 未检测到有效 SESSDATA，启动扫码登录…", flush=True)
+    sessdata = qr_login_sessdata()
+    if not sessdata:
+        print("[!] 扫码登录未完成，退出。", flush=True)
         sys.exit(0)
-
-    sessdata = sessdata.strip().strip("\"'")
-    ENV_PATH.write_text(
-        "# B 站登录态 Cookie — 自动保存，请勿分享。\n"
-        "SESSDATA=" + sessdata + "\n",
-        encoding="utf-8",
-    )
-    print("[+] SESSDATA 已保存到 .env，下次运行不再询问。", flush=True)
     return sessdata
 
 
@@ -355,14 +489,17 @@ class _FastResponse:
         pass  # API 错误码由各调用方自行判断
 
 
-def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None) -> dict:
-    """裸 socket HTTPS 请求 —— 绕过 urllib3/requests 的代理探测开销。
-       本机 requests 库有链路问题（24s），裸 socket 100ms。仅用于 B站 API。"""
-    import socket, ssl, json as _json, time as _time
+def _fast_https_request(host: str, path: str, cookie: str = "",
+                        extra_headers: dict = None, timeout: float = 10) -> tuple[str, bytes]:
+    """裸 socket HTTPS GET —— 绕过 urllib3/requests 的代理探测开销。
+       支持任意 host（api.bilibili.com / passport.bilibili.com 等）。
+       返回 (header_text, body_bytes)：header_text 完整保留，调用方可用
+       正则提取 Set-Cookie（扫码登录需要）等头字段。
+       本机 requests 库有链路问题（24s），裸 socket 100ms。
+    """
+    import socket, ssl, time as _time
 
-    host = "api.bilibili.com"
     port = 443
-    timeout = 5
     deadline = _time.monotonic() + timeout  # 总体超时，防止慢速 trickle 累积
 
     # DNS + TCP
@@ -387,7 +524,7 @@ def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None) ->
         f"User-Agent: {UA}\r\n"
         + extra +
         "Accept: application/json\r\n"
-        + (f"Cookie: SESSDATA={sessdata}\r\n" if sessdata else "") +
+        + (f"Cookie: {cookie}\r\n" if cookie else "") +
         "Connection: close\r\n"
         "\r\n"
     ).encode()
@@ -412,15 +549,15 @@ def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None) ->
     # 解析 body（支持 chunked transfer-encoding）
     header_end = data.find(b"\r\n\r\n")
     if header_end == -1:
-        raise RuntimeError("B站 API 响应格式异常")
+        raise RuntimeError("HTTP 响应格式异常")
 
-    headers_text = data[:header_end].decode("utf-8", errors="replace")
+    header_text = data[:header_end].decode("utf-8", errors="replace")
     body = data[header_end + 4:]
 
     if not body:
-        raise RuntimeError("B站 API 无响应")
+        raise RuntimeError("HTTP 响应无响应体")
 
-    if "chunked" in headers_text.lower():
+    if "chunked" in header_text.lower():
         # decode chunked encoding: <hex-size>\r\n<data>\r\n ... 0\r\n\r\n
         decoded = b""
         pos = 0
@@ -436,8 +573,21 @@ def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None) ->
             pos += chunk_size + 2  # skip \r\n after data
         body = decoded
 
-    result = _json.loads(body)
-    return result
+    return header_text, body
+
+
+def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None) -> dict:
+    """裸 socket HTTPS 请求 —— 绕过 urllib3/requests 的代理探测开销。
+       本机 requests 库有链路问题（24s），裸 socket 100ms。仅用于 B站 API。
+       保留原签名/原返回类型（dict），所有调用方无需改动。
+    """
+    header_text, body = _fast_https_request(
+        "api.bilibili.com", path,
+        cookie=f"SESSDATA={sessdata}" if sessdata else "",
+        extra_headers=extra_headers,
+        timeout=5,
+    )
+    return json.loads(body)
 
 
 def init_bili_session(sessdata: str) -> tuple:
@@ -563,7 +713,15 @@ def resolve_md(session: requests.Session, md_id: int) -> tuple[str, int, str]:
     first_ep = episodes[0]
     return first_ep["bvid"], int(first_ep["cid"]), f"{media_title} - {first_ep.get('long_title') or first_ep.get('share_copy','') or '第' + str(first_ep.get('title', '?')) + '集'}"
 
-def get_cid(session: requests.Session, bvid: str):
+def get_cid_and_title(session: requests.Session, bvid: str, p: int = 1) -> tuple[int, str]:
+    """获取分 P 视频的真实 cid 与组合标题。
+
+    请求 /x/web-interface/view 后遍历 data.pages 匹配 page == p，
+    返回对应分 P 的 cid 与标题：
+      - 单 P 视频:        (cid, 原标题)
+      - 多 P 且 p 命中:    (cid, 原标题 - P{p} {part})
+      - 多 P 且 p 越界:    回退到第 1 P，标题标 P1
+    """
     resp = session.get(
         "https://api.bilibili.com/x/web-interface/view",
         params={"bvid": bvid},
@@ -574,7 +732,38 @@ def get_cid(session: requests.Session, bvid: str):
     j = resp.json()
     if j.get("code") != 0:
         raise RuntimeError(f"获取视频信息失败: {j.get('message')}")
-    return j["data"]["cid"], j["data"]["title"]
+    data = j["data"]
+    base_title = data.get("title", bvid)
+    pages = data.get("pages") or []
+
+    if not pages:
+        return int(data["cid"]), base_title
+
+    # 遍历 pages 匹配目标分 P
+    target = None
+    for pg in pages:
+        if pg.get("page") == p:
+            target = pg
+            break
+    if target is None:
+        target = pages[0]  # 越界回退到第 1 P
+        p = target.get("page", 1)
+
+    cid = int(target["cid"])
+    part = (target.get("part") or "").strip()
+
+    if len(pages) > 1:
+        title = f"{base_title} - P{p} {part}".rstrip() if part else f"{base_title} - P{p}"
+    else:
+        title = base_title
+
+    return cid, title
+
+
+def get_cid(session: requests.Session, bvid: str) -> int:
+    """兼容旧接口：仅返回第一分 P 的 cid。"""
+    cid, _ = get_cid_and_title(session, bvid, p=1)
+    return cid
 
 
 def get_playurl(session: requests.Session, bvid: str, cid: int,
@@ -600,53 +789,392 @@ def get_playurl(session: requests.Session, bvid: str, cid: int,
     return data
 
 
+def _stream_url(item) -> str | None:
+    """从 DASH 流对象提取播放 URL，兼容驼峰(baseUrl/backupUrl)与下划线(base_url/backup_url)。
+    B 站不同接口/不同时段返回的字段命名不一致，双写兼容避免音轨丢失。"""
+    if not item:
+        return None
+    url = item.get("baseUrl") or item.get("base_url")
+    if url:
+        return url
+    backups = item.get("backupUrl") or item.get("backup_url") or []
+    return backups[0] if backups else None
+
+
 def pick_dolby_streams(dash: dict):
-    """提取视频/音频流。
-       优先普通最高清流(兼容性最好),杜比视界仅作备选(易黑屏)。
-       返回 (video_url, audio_url, vdesc, adesc)。
+    """提取视频/音频流 —— 画质为先，AV1 绝对优先。
+
+    视频流: 按 (分辨率 id, CODEC_WEIGHT 编码权重, bandwidth 码率) 联合降序取首条。
+            codecid 13=AV1 极清 > 12=HEVC/H.265 > 7=AVC/H.264。
+            杜比视界仅作备选（易黑屏，无普通流时才用）。
+    音频流: 杜比全景声 > FLAC 无损 > 最高码率普通音频。
+    返回 (video_url, audio_url, vdesc, adesc)。
     """
     video_url = audio_url = None
     vdesc = adesc = ""
 
     dolby = dash.get("dolby") or {}
 
-    # ── 第一优先: 普通最高清视频(兼容性最好,不会黑屏) ──
+    # ── 视频流：联合降序 (id, codec_weight, bandwidth) ──
     vids = dash.get("video") or []
     if vids:
-        best = sorted(vids, key=lambda x: (x.get("id", 0), x.get("bandwidth", 0)))[-1]
-        video_url = best.get("base_url") or (best.get("backup_url") or [None])[0]
-        vdesc = f"普通视频 id={best.get('id')} codec={best.get('codecs', '?')}"
+        best = sorted(
+            vids,
+            key=lambda x: (
+                x.get("id", 0),
+                CODEC_WEIGHT.get(x.get("codecid"), 0),
+                x.get("bandwidth", 0),
+            ),
+            reverse=True,
+        )[0]
+        video_url = _stream_url(best)
+        codecid = best.get("codecid")
+        codec_label = {13: "AV1 极清", 12: "HEVC/H.265", 7: "AVC/H.264"}.get(
+            codecid, f"codec{codecid}"
+        )
+        vdesc = f"{codec_label} id={best.get('id')} {best.get('codecs', '?')}"
 
-    # ── 普通最高码率音频 ──
-    auds = dash.get("audio") or []
-    if auds:
-        best = sorted(auds, key=lambda x: x.get("bandwidth", 0))[-1]
-        audio_url = best.get("base_url") or (best.get("backup_url") or [None])[0]
-        adesc = f"普通音频 id={best.get('id')}"
+    # ── 杜比视界视频仅作备选（易导致黑屏，不推荐自动使用）──
+    if not video_url:
+        dv = dolby.get("video")
+        if dv:
+            video_url = _stream_url(dv[0])
+            vdesc = "杜比视界(Dolby Vision) [兼容性警告]"
 
-    # ── FLAC 无损音频(如果可用,覆盖普通音频) ──
-    flac = dash.get("flac") or {}
-    fa = flac.get("audio")
-    if fa:
-        audio_url = fa.get("base_url") or (fa.get("backup_url") or [None])[0]
-        adesc = "FLAC 无损"
-
-    # ── 杜比全景声(如果可用,覆盖 FLAC) ──
+    # ── 音频流：杜比全景声 > FLAC 无损 > 最高码率 ──
     da = dolby.get("audio")
     if da:
-        a = da[0]
-        audio_url = a.get("base_url") or (a.get("backupUrl") or [None])[0]
+        audio_url = _stream_url(da[0])
         adesc = "杜比全景声(Dolby Atmos/E-AC-3)"
+    else:
+        flac = dash.get("flac") or {}
+        fa = flac.get("audio")
+        if fa:
+            audio_url = _stream_url(fa)
+            adesc = "FLAC 无损"
+        else:
+            auds = dash.get("audio") or []
+            if auds:
+                best = sorted(auds, key=lambda x: x.get("bandwidth", 0), reverse=True)[0]
+                audio_url = _stream_url(best)
+                adesc = f"普通音频 id={best.get('id')} {best.get('codecs', '?')}"
 
-    # ── 杜比视界仅作为备选(易导致黑屏,不推荐自动使用) ──
-    dv = dolby.get("video")
-    if dv and not video_url:
-        # 只有找不到普通流时才用杜比视界
-        v = dv[0]
-        video_url = v.get("base_url") or (v.get("backupUrl") or [None])[0]
-        vdesc = "杜比视界(Dolby Vision) [兼容性警告]"
+    # 起播/切集前的调试打印：确认音频流 URL 是否提取成功
+    if not audio_url:
+        print("[Debug] 警告: 未提取到音频流 URL（可能是音频字段缺失/不支持杜比）", flush=True)
+    else:
+        print(f"[Debug] 提取到的音频流 URL: {audio_url[:120]}", flush=True)
 
     return video_url, audio_url, vdesc, adesc
+
+
+# ============================================================================
+# 5.5 剧集列表 & MPV IPC 切集（< / > 前后切集 + 播完自动下一集）
+# ============================================================================
+
+# MPV IPC 命名管道（--input-ipc-server=\\.\pipe\bili-mpv-ipc）
+# 注意：mpv 的 input-ipc-server 类型标注为 [file]（Windows 用命名管道），
+#       不支持 tcp:// 前缀。Python 端用 ctypes 调 kernel32 直连，零额外依赖。
+IPC_PIPE = r"\\.\pipe\bili-mpv-ipc"
+
+# 会话级剧集状态：供 IPC 后台线程切集使用
+_EPISODE_STATE = {
+    "episodes": [],   # [{bvid, cid, title}, ...] 按播放顺序
+    "index": -1,      # 当前播放索引
+    "ctx": None,      # dict(session, img_key, sub_key, sessdata)
+}
+_IPC_THREAD = None   # 后台 IPC 监听线程（end-file 事件）
+_SIGNAL_THREAD = None  # 后台信号文件轮询线程（Lua 切集键）
+
+
+# ---- Windows 命名管道客户端（ctypes，零额外依赖）----
+def _pipe_open(timeout_ms: int = 3000):
+    """打开 MPV 命名管道。成功返回句柄，失败返回 None。"""
+    import ctypes
+    from ctypes import wintypes
+
+    GENERIC_READ = 0x80000000
+    GENERIC_WRITE = 0x40000000
+    OPEN_EXISTING = 3
+
+    k32 = ctypes.windll.kernel32
+    k32.WaitNamedPipeW.restype = wintypes.BOOL
+    k32.WaitNamedPipeW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
+    if not k32.WaitNamedPipeW(IPC_PIPE, timeout_ms):
+        return None
+
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                                wintypes.HANDLE]
+    # 注意：restype=c_void_p 时 ctypes 把返回值自动转成 Python int
+    # （无效句柄为 2**64-1 = 无符号 -1），不能再用 .value
+    h = k32.CreateFileW(IPC_PIPE, GENERIC_READ | GENERIC_WRITE, 0, None,
+                        OPEN_EXISTING, 0, None)
+    if not h or h == 0xFFFFFFFFFFFFFFFF or h == 0xFFFFFFFF:
+        return None
+
+    # 切换到消息读取模式，保证一次 ReadFile 拿一条完整 JSON 消息
+    k32.SetNamedPipeHandleState.restype = wintypes.BOOL
+    k32.SetNamedPipeHandleState.argtypes = [wintypes.HANDLE,
+                                            ctypes.POINTER(wintypes.DWORD),
+                                            ctypes.c_void_p, ctypes.c_void_p]
+    mode = wintypes.DWORD(0x2)  # PIPE_READMODE_MESSAGE
+    k32.SetNamedPipeHandleState(h, ctypes.byref(mode), None, None)
+    return h
+
+
+def _pipe_write(h, data: bytes) -> bool:
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.windll.kernel32
+    k32.WriteFile.restype = wintypes.BOOL
+    k32.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                              ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    written = wintypes.DWORD()
+    ok = k32.WriteFile(h, data, len(data), ctypes.byref(written), None)
+    return bool(ok)
+
+
+def _pipe_read_message(h, buf_size: int = 65536):
+    """阻塞读一条消息。管道断开返回 b""，读取错误返回 None。"""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.windll.kernel32
+    k32.ReadFile.restype = wintypes.BOOL
+    k32.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                             ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    buf = ctypes.create_string_buffer(buf_size)
+    read = wintypes.DWORD()
+    ok = k32.ReadFile(h, buf, buf_size, ctypes.byref(read), None)
+    if not ok:
+        return None
+    return buf.raw[:read.value]
+
+
+def _pipe_close(h):
+    import ctypes
+    from ctypes import wintypes
+    ctypes.windll.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    ctypes.windll.kernel32.CloseHandle(h)
+
+
+def fetch_episode_list(session, source_type: str, source_id) -> list[dict]:
+    """获取剧集列表（按播放顺序）。
+
+    source_type: 'bili'（BV 分 P）| 'ep'（番剧单集）| 'ss'（番剧合集）
+    返回 [{bvid, cid, title}, ...]
+    """
+    eps: list[dict] = []
+
+    if source_type == "bili":
+        resp = session.get(
+            "https://api.bilibili.com/x/web-interface/view",
+            params={"bvid": source_id}, headers=COMMON_HEADERS, timeout=10,
+        )
+        resp.raise_for_status()
+        j = resp.json()
+        if j.get("code") != 0:
+            raise RuntimeError(f"获取视频信息失败: {j.get('message')}")
+        data = j["data"]
+        base = data.get("title", str(source_id))
+        pages = data.get("pages") or []
+        for pg in pages:
+            part = (pg.get("part") or "").strip()
+            if len(pages) > 1:
+                t = f"{base} - P{pg.get('page')} {part}".rstrip()
+            else:
+                t = base
+            eps.append({"bvid": str(source_id), "cid": int(pg["cid"]), "title": t})
+
+    elif source_type in ("ep", "ss"):
+        params = {"ep_id": source_id} if source_type == "ep" else {"season_id": source_id}
+        resp = session.get(
+            "https://api.bilibili.com/pgc/view/web/season",
+            params=params, headers=COMMON_HEADERS, timeout=10,
+        )
+        resp.raise_for_status()
+        j = resp.json()
+        if j.get("code") != 0:
+            raise RuntimeError(f"获取番剧信息失败: {j.get('message')}")
+        result = j["result"]
+        season_title = result.get("season_title") or result.get("title") or ""
+        for ep in result.get("episodes", []):
+            ep_t = (ep.get("long_title") or ep.get("share_copy")
+                    or f"第{ep.get('title', '?')}集")
+            eps.append({
+                "bvid": ep["bvid"], "cid": int(ep["cid"]),
+                "title": f"{season_title} - {ep_t}" if season_title else ep_t,
+            })
+
+    return eps
+
+
+def set_episode_state(episodes: list, index: int, ctx: dict):
+    """记录当前剧集列表与播放上下文（IPC 切集线程消费）。"""
+    _EPISODE_STATE["episodes"] = episodes or []
+    _EPISODE_STATE["index"] = index if 0 <= index < len(episodes or []) else 0
+    _EPISODE_STATE["ctx"] = ctx
+
+
+# ---- MPV IPC 客户端（Windows 命名管道 JSON-RPC，ctypes 零依赖）----
+
+def _ipc_send_cmd(cmd) -> bool:
+    """临时连接 MPV 命名管道发送一条命令。成功返回 True。"""
+    try:
+        h = _pipe_open(timeout_ms=2000)
+        if not h:
+            return False
+        try:
+            payload = (json.dumps({"command": cmd}) + "\n").encode()
+            return _pipe_write(h, payload)
+        finally:
+            _pipe_close(h)
+    except Exception:
+        return False
+
+
+def _ipc_loadfile(video_url: str, audio_url: str | None, title: str) -> bool:
+    """通过 IPC 无缝切流并挂载音频轨。
+
+    实测结论（mpv 0.41 / win32 IPC）：
+      - set_property("audio-file")  → 无效（audio-file 是 CLI option 非可写 property）
+      - loadfile 的 options 参数    → 本构建整体不生效（连 start=1 都被忽略）
+      - audio-add <url> auto       → ✅ 唯一运行时挂音频轨的有效途径
+    切流后标题用 set_property force-media-title（可写 property）。
+    """
+    safe_title = (title or "").replace(",", "，")  # 逗号仅作显示安全
+    _ipc_send_cmd(["set_property", "force-media-title", safe_title])
+    _ipc_send_cmd(["loadfile", video_url, "replace"])
+    if audio_url:
+        # 实测：loadfile 未完成时 audio-add 会被丢弃，必须等文件加载完成再挂音轨；
+        # select flag 强制选中该音轨（auto 不会 selected，可能导致哑剧）
+        time.sleep(1.0)
+        _ipc_send_cmd(["audio-add", audio_url, "select"])
+    return True
+
+
+def _switch_episode(direction: int):
+    """切到下一集(+1)/上一集(-1)。越界时保持原位。"""
+    st = _EPISODE_STATE
+    eps = st.get("episodes") or []
+    idx = st.get("index", -1)
+    if not eps or idx < 0:
+        print("[*] 无剧集上下文，跳过切集。", flush=True)
+        return
+
+    target = idx + direction
+    if target < 0 or target >= len(eps):
+        edge = "开头" if direction < 0 else "末尾"
+        print(f"[*] 已到{edge}，不切换。", flush=True)
+        return
+
+    ep = eps[target]
+    ctx = st.get("ctx") or {}
+    try:
+        data = get_playurl(ctx["session"], ep["bvid"], ep["cid"],
+                           ctx["img_key"], ctx["sub_key"])
+        dash = data.get("dash")
+        if not dash:
+            print("[!] 该集无 DASH 数据，跳过。", flush=True)
+            return
+        vurl, aurl, vd, ad = pick_dolby_streams(dash)
+        if not vurl:
+            print("[!] 该集无可播放视频流。", flush=True)
+            return
+
+        if not _ipc_loadfile(vurl, aurl, ep["title"]):
+            print("[!] MPV IPC 连接失败，切集未生效。", flush=True)
+            return
+
+        st["index"] = target
+        print(f"[+] 已切{'下一' if direction > 0 else '上一'}集: "
+              f"{ep['title']} ({vd})", flush=True)
+    except Exception as e:
+        print(f"[!] 切集失败: {e}", flush=True)
+
+
+def _handle_mpv_event(ev: dict):
+    """处理 MPV IPC 事件：自动连播。
+    实测确认：keep-open=yes 下 end-file 事件不发送，必须 observe eof-reached
+    属性（EOF 到达时变 true）。end-file 仅作补充兜底。"""
+    etype = ev.get("event")
+
+    # 主信号：eof-reached 属性变化为 true（自动切下一集）
+    if etype == "property-change" and ev.get("id") == 2 and ev.get("data") is True:
+        _switch_episode(+1)
+        return
+
+    # 补充兜底：end-file reason=eof（非 keep-open 或部分场景仍会发）
+    if etype == "end-file" and ev.get("reason") == "eof":
+        _switch_episode(+1)
+
+
+def _mpv_ipc_loop():
+    """后台线程：连接 MPV 命名管道，observe eof-reached 实现自动连播。"""
+    while True:
+        h = _pipe_open(timeout_ms=3000)
+        if not h:
+            time.sleep(1.5)   # MPV 未启动 / 已退出，稍后重连
+            continue
+        try:
+            # 观察 eof-reached 属性（id=2）：EOF 到达变 true → 自动切下一集
+            payload = (json.dumps({"command": ["observe_property", 2,
+                                               "eof-reached"]}) + "\n").encode()
+            _pipe_write(h, payload)
+            while True:
+                msg = _pipe_read_message(h)
+                if msg is None:
+                    break   # 管道断开，重连
+                line = msg.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                _handle_mpv_event(ev)
+        except Exception:
+            pass
+        finally:
+            _pipe_close(h)
+
+
+_NAV_SIGNAL = _CONFIG_DIR / "bili-nav.signal"   # Lua 写入、Python 轮询的切集信号
+
+def _nav_signal_loop():
+    """后台线程：轮询切集信号文件（Lua 的 > / < 写入），读后删除防重复。"""
+    while True:
+        try:
+            if _NAV_SIGNAL.exists():
+                try:
+                    nav = _NAV_SIGNAL.read_text(encoding="utf-8").strip()
+                    if nav == "next":
+                        _switch_episode(+1)
+                    elif nav == "prev":
+                        _switch_episode(-1)
+                finally:
+                    try:
+                        _NAV_SIGNAL.unlink()
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+        time.sleep(0.3)
+        time.sleep(1.5)
+
+
+def start_ipc_monitor():
+    """启动 MPV IPC 监听线程（幂等）。"""
+    global _IPC_THREAD, _SIGNAL_THREAD
+    if _IPC_THREAD and _IPC_THREAD.is_alive():
+        # IPC 线程活着即认为整套已启动，信号线程一并就绪
+        return
+    _IPC_THREAD = threading.Thread(target=_mpv_ipc_loop, daemon=True)
+    _IPC_THREAD.start()
+    if not (_SIGNAL_THREAD and _SIGNAL_THREAD.is_alive()):
+        _SIGNAL_THREAD = threading.Thread(target=_nav_signal_loop, daemon=True)
+        _SIGNAL_THREAD.start()
 
 
 # ============================================================================
@@ -800,9 +1328,16 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
         f"--force-media-title={title}",
         f"--config-dir={portable_conf}",
         "--log-file=" + str(_CONFIG_DIR / "mpv.log"),
+        # MPV IPC：切集通道（命名管道，< / > 切集 + 播完自动下一集）
+        f"--input-ipc-server={IPC_PIPE}",
     ]
 
-    # ── B 站：CDN 直链 + cookie + DASH 音视频分离，不需要 mpv 脚本 ────────
+    # 注入切集快捷键转发脚本（Lua，绑定 Ctrl+←/Ctrl+→ → 写信号文件）
+    lua_script = str(_exe_dir / "bili-ipc.lua")
+    if os.path.isfile(lua_script):
+        cmd += [f"--script={lua_script}"]
+
+    # ── B 站：CDN 直链 + cookie + DASH 音视频分离 ──────────────────────────
     if sessdata:
         cookie_fd, cookie_path = tempfile.mkstemp(
             suffix=".txt", prefix="bili_cookies_", text=True
@@ -812,16 +1347,15 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
             f.write(".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\t" + sessdata + "\n")
         atexit.register(lambda p=cookie_path: os.unlink(p) if os.path.exists(p) else None)
         cmd += [
-            "--load-scripts=no",   # B站走直链,跳过脚本加载提速
             "--cookies-file=" + cookie_path,
             "--http-header-fields=Referer: " + REFERER,
             "--user-agent=" + UA,
         ]
         if audio_url:
+            # 仅挂外部音频文件；m4s 网络流由 mpv 自动探测，
+            # 不强制 --audio-demuxer / --load-scripts（会干扰音轨加载与 Lua 脚本）
             cmd += [
                 f"--audio-file={audio_url}",
-                "--audio-demuxer=lavf",
-                "--demuxer-lavf-probescore=100",
             ]
 
     # ── YouTube：ytdl_hook 解析 + 走系统代理 ──────────────────────────────
@@ -857,6 +1391,9 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
     if sys.platform == "win32":
         popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
     proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, **popen_kw)
+
+    # 启动 IPC 监听线程：支持 < / > 切集 + 播完自动下一集（幂等）
+    start_ipc_monitor()
 
     # cookie 文件由 atexit 自动清理，无需阻塞等待
 
@@ -899,11 +1436,22 @@ def read_clipboard() -> str:
 
     return ""
 
-def process_bvid(session, bvid, img_key, sub_key, player_path, sessdata):
-    """B 站：CDN 直链 + SMPlayer 透传 mpv 参数。"""
-    print(f"  [*] 开始解析 {bvid} …")
-    cid, title = get_cid(session, bvid)
+def process_bvid(session, bvid, img_key, sub_key, player_path, sessdata, p=1):
+    """B 站：CDN 直链 + mpv 透传参数。支持分 P。"""
+    print(f"  [*] 开始解析 {bvid} (P{p}) …")
+    cid, title = get_cid_and_title(session, bvid, p=p)
     print(f"  [+] 标题: {title}")
+
+    # 维护剧集列表，供 MPV 内部切集（< / > 与播完自动下一集）
+    try:
+        eps = fetch_episode_list(session, "bili", bvid)
+        index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
+        set_episode_state(eps, index, {
+            "session": session, "img_key": img_key,
+            "sub_key": sub_key, "sessdata": sessdata,
+        })
+    except Exception:
+        pass  # 剧集列表失败不阻断播放
 
     data = get_playurl(session, bvid, cid, img_key, sub_key)
     dash = data.get("dash")
@@ -975,16 +1523,19 @@ def main():
             heartbeat = 0
             print(".", end="", flush=True)
 
-        # ---- B 站 ----
+        # ---- B 站（支持分 P：提取 ?p= 参数，去重键 {bvid}_p{p}）----
         m = BV_RE.search(text)
         if m:
             bvid = m.group(1)
-            if bvid != last_vid:
-                last_vid = bvid
-                print(f"\n>> 检测到 B 站链接: {bvid}", flush=True)
+            pm = P_PARAM_RE.search(text)
+            p = int(pm.group(1)) if pm else 1
+            vid_key = f"{bvid}_p{p}"
+            if vid_key != last_vid:
+                last_vid = vid_key
+                print(f"\n>> 检测到 B 站链接: {bvid} (P{p})", flush=True)
                 try:
                     process_bvid(session, bvid, img_key, sub_key,
-                                 player_path, sessdata)
+                                 player_path, sessdata, p=p)
                 except Exception as e:
                     print(f"  [!] 播放失败: {e}", flush=True)
             time.sleep(0.5)
@@ -1013,6 +1564,15 @@ def main():
                 try:
                     bvid, cid, full_title = resolve_episode(session, int(ep_id))
                     print(f"  [+] {full_title} (BV={bvid})", flush=True)
+                    try:
+                        eps = fetch_episode_list(session, "ep", int(ep_id))
+                        index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
+                        set_episode_state(eps, index, {
+                            "session": session, "img_key": img_key,
+                            "sub_key": sub_key, "sessdata": sessdata,
+                        })
+                    except Exception:
+                        pass
                     data = get_playurl(session, bvid, cid, img_key, sub_key)
                     dash = data.get("dash")
                     if not dash:
@@ -1041,6 +1601,15 @@ def main():
                 try:
                     bvid, cid, full_title = resolve_ss(session, int(ss_id))
                     print(f"  [+] {full_title} (BV={bvid})", flush=True)
+                    try:
+                        eps = fetch_episode_list(session, "ss", int(ss_id))
+                        index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
+                        set_episode_state(eps, index, {
+                            "session": session, "img_key": img_key,
+                            "sub_key": sub_key, "sessdata": sessdata,
+                        })
+                    except Exception:
+                        pass
                     data = get_playurl(session, bvid, cid, img_key, sub_key)
                     dash = data.get("dash")
                     if not dash:

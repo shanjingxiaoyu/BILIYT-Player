@@ -19,6 +19,15 @@
     *   **快捷键与交互**：修改 `mpv-portable/portable_config/input.conf`。例如：自定义按键来调节亮度 (`brightness`)、音量、对比度等。
 *   **Python 的唯一职责**：如果必须在启动时动态传递参数给 mpv，只能修改 `bili_clipboard_dolby.py` 中的 `launch_player` 函数，通过 `cmd` 列表传递 CLI 参数（例如 `--brightness=15`）。命令行参数会覆盖 mpv.conf 中的同名选项。
 
+### 2.5 智能 WASAPI 音频自适应路由（音频规则）
+*   **音频输出策略完全由 mpv.conf 的 profile-cond 自动管理**，Python 不做任何音频设备 / 编码格式判断。三组自动 profile（依据 `audio-codec-name` + `audio-device` 属性自动切换）：
+    *   `[Audio-BitPerfect]` — 普通音轨（FLAC/AAC/PCM/Opus/Vorbis/MP3）→ `audio-exclusive=yes`，WASAPI 独占实现 Bit-Perfect，避开 Windows 系统重采样
+    *   `[Audio-Passthrough]` — 杜比/DTS 音轨（AC3/EAC3/DTS/TrueHD/MLP）＋ HDMI/SPDIF 功放/回音壁设备 → `audio-exclusive=yes` + `audio-spdif=ac3,eac3,dts,dts-hd,truehd` 源码透传
+    *   `[Audio-DolbyAccess]` — 杜比/DTS 音轨 ＋ 普通耳机/板载声卡 → `audio-exclusive=no` + `audio-spdif=no`，交给 Windows Dolby Access 渲染空间音效
+*   **设备识别关键词**：`Display Audio` / `HDMI` / `S/PDIF` / `Digital` / `AVR` / `Soundbar` / `Receiver`（可自行增删；`audio-device` 在 Windows 下形如 `wasapi/{GUID} (设备名)`）
+*   **⚠️ Lua 语法陷阱（已踩坑，禁止再犯）**：Lua 的 `string.match` **不支持 `|` 交替语法**（`|` 只是普通字符），写 `"flac|aac|pcm"` 永远匹配不到。必须用多个 `string.match(...) ~= nil or ...` 组合。
+*   排查指引：HDMI 透传无声 → 检查功放解码能力是否支持对应格式；耳机杜比无空间感 → 确认 Dolby Access 应用已安装并启用。
+
 ## 3. 网络请求与并发原则
 *   **剪贴板监听线程必须非阻塞**：监听线程只做剪贴板读取 + 正则匹配，检测到新链接入队 (`queue.Queue`)，不做任何网络请求。网络请求由独立的 Worker 线程消费。
 *   **B站 API 请求**：当前使用裸 socket HTTPS 直连以避免 `requests` 库的代理探测延迟。如需迁移到 `requests`，必须配置 `trust_env=False` 且不传 proxies 字典，否则 Windows 下会有 20s+ 延迟。
