@@ -952,7 +952,57 @@ def _ipc_loadfile(video_url: str, audio_url: str | None, title: str) -> bool:
         # select flag 强制选中该音轨（auto 不会 selected，可能导致哑剧）
         time.sleep(1.0)
         _ipc_send_cmd(["audio-add", audio_url, "select"])
+    # 切集后自动续播依赖 mpv.conf 的 keep-open-pause=no（EOF 只冻帧不暂停，
+    # 暂停态不会被 loadfile 的新文件继承）。不要在这里补 set pause no——
+    # 那会连用户手动暂停也一并恢复，抢用户的控制权。
     return True
+
+
+def get_playurl_pgc(session: requests.Session, bvid: str, cid: int) -> dict:
+    """番剧(PGC)播放地址。
+
+    2026-10-19 实测：视频 API（/x/player/wbi/playurl）对番剧一律返回
+    code=-404「啥都木有」，必须走 PGC 专用 API。免费账号通常只拿到渐进式
+    durl（单文件音视频混合，常见 480p）；大会员才有 DASH 分离流。
+    """
+    params = {
+        "bvid": bvid, "cid": cid,
+        "qn": 126, "fnver": 0, "fnval": 4048, "fourk": 1,
+    }
+    resp = session.get(
+        "https://api.bilibili.com/pgc/player/web/playurl",
+        params=params,
+        headers=COMMON_HEADERS,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    j = resp.json()
+    if j.get("code") != 0:
+        raise RuntimeError(
+            f"番剧 playurl 失败: {j.get('message')} (code={j.get('code')})")
+    result = j.get("result") or {}
+    if not (result.get("dash") or result.get("durl")):
+        msg = result.get("message") or "该番剧需要大会员或所在地区不支持"
+        raise RuntimeError(f"番剧无可用流: {msg}")
+    return result
+
+
+def pick_streams_from_result(result: dict):
+    """从 playurl 结果提取流——兼容 DASH(result.dash) 与渐进式(result.durl)。
+
+    返回 (video_url, audio_url|None, vdesc, adesc)。
+    durl 是单文件混合流，audio_url 为 None（mpv 直接播，无需挂外部音轨）。
+    """
+    if result.get("dash"):
+        return pick_dolby_streams(result["dash"])
+    for d in result.get("durl") or []:
+        url = d.get("url") or (d.get("backup_url") or [None])[0]
+        if url:
+            qmap = {126: "4K", 120: "4K", 112: "1080P+", 80: "1080P",
+                    64: "720P", 32: "480P", 16: "360P"}
+            q = result.get("quality")
+            return url, None, qmap.get(q, f"qn{q}"), "内置音轨(渐进式)"
+    raise RuntimeError("playurl 无可用流（dash/durl 均空）")
 
 
 def _switch_episode(direction: int):
@@ -973,13 +1023,18 @@ def _switch_episode(direction: int):
     ep = eps[target]
     ctx = st.get("ctx") or {}
     try:
-        data = get_playurl(ctx["session"], ep["bvid"], ep["cid"],
-                           ctx["img_key"], ctx["sub_key"])
-        dash = data.get("dash")
-        if not dash:
-            print("[!] 该集无 DASH 数据，跳过。", flush=True)
-            return
-        vurl, aurl, vd, ad = pick_dolby_streams(dash)
+        if ctx.get("pgc"):
+            # 番剧：PGC API（免费账号渐进式 durl，大会员 DASH）
+            result = get_playurl_pgc(ctx["session"], ep["bvid"], ep["cid"])
+            vurl, aurl, vd, ad = pick_streams_from_result(result)
+        else:
+            data = get_playurl(ctx["session"], ep["bvid"], ep["cid"],
+                               ctx["img_key"], ctx["sub_key"])
+            dash = data.get("dash")
+            if not dash:
+                print("[!] 该集无 DASH 数据，跳过。", flush=True)
+                return
+            vurl, aurl, vd, ad = pick_dolby_streams(dash)
         if not vurl:
             print("[!] 该集无可播放视频流。", flush=True)
             return

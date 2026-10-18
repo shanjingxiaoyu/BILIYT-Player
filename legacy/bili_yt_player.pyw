@@ -458,26 +458,37 @@ class App:
             "sub_key": self.sub_key, "sessdata": self.sessdata,
         }
 
-    def _setup_episodes(self, source_type, source_id, cid):
+    def _setup_episodes(self, source_type, source_id, cid, pgc=False):
         """获取剧集列表并写入切集状态（Ctrl+←→ 切集 + 播完自动连播）。"""
         from bili_clipboard_dolby import fetch_episode_list, set_episode_state
         try:
             eps = fetch_episode_list(self.session, source_type, source_id)
             index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
-            set_episode_state(eps, index, self._episode_ctx())
+            ctx = self._episode_ctx()
+            ctx["pgc"] = pgc  # 番剧切集走 PGC API，普通 BV 走视频 API
+            set_episode_state(eps, index, ctx)
             self._log(f"  [*] 剧集列表 {len(eps)} 集，当前第 {index + 1} 集")
         except Exception as e:
             self._log(f"  [!] 剧集列表获取失败，自动连播不可用: {e}")
 
-    def _play_dash(self, platform, vid_label, bvid, cid, title):
-        """公共播放链路：取 DASH → 选流 → 记历史 → 唤起 mpv。"""
-        from bili_clipboard_dolby import get_playurl, pick_dolby_streams, launch_player
-        data = get_playurl(self.session, bvid, cid, self.img_key, self.sub_key)
-        dash = data.get("dash")
-        if not dash:
-            self._log("  [!] 无 DASH 数据")
-            return
-        vurl, aurl, vd, ad = pick_dolby_streams(dash)
+    def _play_dash(self, platform, vid_label, bvid, cid, title, pgc=False):
+        """公共播放链路：取流 → 选流 → 记历史 → 唤起 mpv。
+
+        pgc=True（番剧 ep/ss/md）走 PGC 专用 API——视频 API 对番剧返回 -404。
+        """
+        from bili_clipboard_dolby import (get_playurl, get_playurl_pgc,
+                                          pick_dolby_streams,
+                                          pick_streams_from_result, launch_player)
+        if pgc:
+            result = get_playurl_pgc(self.session, bvid, cid)
+            vurl, aurl, vd, ad = pick_streams_from_result(result)
+        else:
+            data = get_playurl(self.session, bvid, cid, self.img_key, self.sub_key)
+            dash = data.get("dash")
+            if not dash:
+                self._log("  [!] 无 DASH 数据")
+                return
+            vurl, aurl, vd, ad = pick_dolby_streams(dash)
         self._add_history(platform, vid_label, title, vd, ad or "普通音频")
         launch_player(self.player_path, vurl, title, audio_url=aurl,
                       sessdata=self.sessdata, log=self._log)
@@ -507,10 +518,10 @@ class App:
             raise ValueError(f"未知播放类型: {kind}")
         self._log(f"  [+] {title} (BV={bvid})")
         if eptype:
-            self._setup_episodes(*eptype, cid)
+            self._setup_episodes(*eptype, cid, pgc=(kind != "bili"))
         else:
             self._log("  [*] 媒体详情页无 season id，不支持切集连播")
-        self._play_dash(platform, label, bvid, cid, title)
+        self._play_dash(platform, label, bvid, cid, title, pgc=(kind != "bili"))
 
     def _play_yt(self, ytid):
         from bili_clipboard_dolby import launch_player
