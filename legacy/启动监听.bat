@@ -10,7 +10,9 @@ echo 正在启动 BiliYTPlayer...
 echo 支持: BV 视频 / EP 番剧电影 / YouTube 链接
 echo.
 
-if exist ".venv\Scripts\python.exe" (
+if exist ".venv-tk\Scripts\python.exe" (
+    .venv-tk\Scripts\python.exe -u bili_yt_player.pyw
+) else if exist ".venv\Scripts\python.exe" (
     .venv\Scripts\python.exe -u bili_yt_player.pyw
 ) else (
     python -u bili_yt_player.pyw
