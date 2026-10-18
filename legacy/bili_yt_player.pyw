@@ -93,7 +93,6 @@ class App:
         self.sessdata = None
         self.running = False
         self.paused = False
-        self.history: list[str] = []
         self.task_queue: queue.Queue = queue.Queue()
         self.recent_ids: deque[str] = deque(maxlen=20)
 
@@ -150,7 +149,7 @@ class App:
         self.pause_btn = ttk.Button(btn_frame, text="暂停监听", command=self.toggle_pause)
         self.pause_btn.pack(side="left")
 
-        ttk.Button(btn_frame, text="清空历史", command=self._clear_history).pack(side="left", padx=6)
+        ttk.Button(btn_frame, text="重新登录", command=self._relogin).pack(side="left", padx=6)
 
         ttk.Button(btn_frame, text="退出", command=self._quit).pack(side="right")
 
@@ -172,7 +171,6 @@ class App:
         """线程安全：后台线程只做数据处理，UI 操作通过 root.after 调度到主线程。"""
         ts = datetime.now().strftime("%H:%M")
         line = f"[{ts}] {platform} {vid}  {title}  |  {quality}  {audio}"
-        self.history.append(line)
         self.root.after(0, self._add_history_ui, line)
 
     def _add_history_ui(self, line):
@@ -182,11 +180,37 @@ class App:
         self.hist_text.see("end")
         self.hist_text.configure(state="disabled")
 
-    def _clear_history(self):
-        self.history.clear()
-        self.hist_text.configure(state="normal")
-        self.hist_text.delete("1.0", "end")
-        self.hist_text.configure(state="disabled")
+    def _relogin(self):
+        """运行中手动重新登录（换账号/登录态异常时用）。
+
+        弹扫码 → 成功后后台线程热替换会话：不重启应用、不丢剪贴板监听。
+        取消或失败则原登录态原样保留。启动时因网络异常没进监听态的，
+        重新登录成功后自动恢复监听。
+        """
+        from bili_clipboard_dolby import init_bili_session
+        self._log("[*] 正在打开扫码登录…")
+        sd = self._qr_login_window()
+        if not sd:
+            self._log("[*] 已取消重新登录，当前登录态保持不变。")
+            return
+        self._log("[*] 扫码成功，正在验证新登录态…")
+
+        def do_init():
+            try:
+                session, img_key, sub_key = init_bili_session(sd)
+            except Exception as e:
+                self._log(f"[!] 新登录态验证失败，继续使用原登录态: {e}")
+                return
+            self.sessdata = sd
+            self.session, self.img_key, self.sub_key = session, img_key, sub_key
+            self._log("[+] 重新登录成功，B 站鉴权已切换。")
+            # 启动时若因网络异常没进入监听态，借此恢复
+            if not self.running:
+                self.root.after(0, lambda: self.pause_btn.configure(
+                    text="暂停监听", state="normal"))
+                self.start_monitor()
+
+        threading.Thread(target=do_init, daemon=True).start()
 
     # ---------- SESSDATA 扫码登录 ----------
     def _qr_login_window(self) -> str | None:
