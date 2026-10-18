@@ -420,54 +420,63 @@ class App:
             self._log(f"  [!] {e}")
 
     # ---------- 播放 ----------
-    def _play_bili(self, bvid, p=1):
-        from bili_clipboard_dolby import (get_cid_and_title, get_playurl,
-                                          pick_dolby_streams, launch_player,
-                                          fetch_episode_list, set_episode_state)
-        cid, title = get_cid_and_title(self.session, bvid, p=p)
-        # 维护剧集列表供 MPV 内部切集（Ctrl+←→ + 播完自动下一集）
+    def _episode_ctx(self) -> dict:
+        """切集线程所需的播放上下文（session + WBI 密钥 + 登录态）。"""
+        return {
+            "session": self.session, "img_key": self.img_key,
+            "sub_key": self.sub_key, "sessdata": self.sessdata,
+        }
+
+    def _setup_episodes(self, source_type, source_id, cid):
+        """获取剧集列表并写入切集状态（Ctrl+←→ 切集 + 播完自动连播）。"""
+        from bili_clipboard_dolby import fetch_episode_list, set_episode_state
         try:
-            eps = fetch_episode_list(self.session, "bili", bvid)
+            eps = fetch_episode_list(self.session, source_type, source_id)
             index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
-            set_episode_state(eps, index, {
-                "session": self.session, "img_key": self.img_key,
-                "sub_key": self.sub_key, "sessdata": self.sessdata,
-            })
+            set_episode_state(eps, index, self._episode_ctx())
             self._log(f"  [*] 剧集列表 {len(eps)} 集，当前第 {index + 1} 集")
         except Exception as e:
             self._log(f"  [!] 剧集列表获取失败，自动连播不可用: {e}")
+
+    def _play_dash(self, platform, vid_label, bvid, cid, title):
+        """公共播放链路：取 DASH → 选流 → 记历史 → 唤起 mpv。"""
+        from bili_clipboard_dolby import get_playurl, pick_dolby_streams, launch_player
         data = get_playurl(self.session, bvid, cid, self.img_key, self.sub_key)
         dash = data.get("dash")
         if not dash:
             self._log("  [!] 无 DASH 数据")
             return
         vurl, aurl, vd, ad = pick_dolby_streams(dash)
-        self._add_history("B站", f"{bvid}_p{p}", title, vd, ad or "普通音频")
-        launch_player(self.player_path, vurl, title, audio_url=aurl, sessdata=self.sessdata, log=self._log)
+        self._add_history(platform, vid_label, title, vd, ad or "普通音频")
+        launch_player(self.player_path, vurl, title, audio_url=aurl,
+                      sessdata=self.sessdata, log=self._log)
+
+    def _play_bili(self, bvid, p=1):
+        from bili_clipboard_dolby import get_cid_and_title
+        cid, title = get_cid_and_title(self.session, bvid, p=p)
+        self._setup_episodes("bili", bvid, cid)
+        self._play_dash("B站", f"{bvid}_p{p}", bvid, cid, title)
 
     def _play_episode(self, ep_id: int):
-        from bili_clipboard_dolby import (get_playurl, pick_dolby_streams,
-                                          launch_player, resolve_episode,
-                                          fetch_episode_list, set_episode_state)
+        from bili_clipboard_dolby import resolve_episode
         bvid, cid, full_title = resolve_episode(self.session, ep_id)
         self._log(f"  [+] {full_title} (BV={bvid})")
-        try:
-            eps = fetch_episode_list(self.session, "ep", ep_id)
-            index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
-            set_episode_state(eps, index, {
-                "session": self.session, "img_key": self.img_key,
-                "sub_key": self.sub_key, "sessdata": self.sessdata,
-            })
-        except Exception:
-            pass
-        data = get_playurl(self.session, bvid, cid, self.img_key, self.sub_key)
-        dash = data.get("dash")
-        if not dash:
-            self._log("  [!] 无 DASH 数据")
-            return
-        vurl, aurl, vd, ad = pick_dolby_streams(dash)
-        self._add_history("番剧", f"ep{ep_id}", full_title, vd, ad or "普通音频")
-        launch_player(self.player_path, vurl, full_title, audio_url=aurl, sessdata=self.sessdata, log=self._log)
+        self._setup_episodes("ep", ep_id, cid)
+        self._play_dash("番剧", f"ep{ep_id}", bvid, cid, full_title)
+
+    def _play_ss(self, ss_id: int):
+        from bili_clipboard_dolby import resolve_ss
+        bvid, cid, full_title = resolve_ss(self.session, ss_id)
+        self._log(f"  [+] {full_title} (BV={bvid})")
+        self._setup_episodes("ss", ss_id, cid)
+        self._play_dash("番剧合集", f"ss{ss_id}", bvid, cid, full_title)
+
+    def _play_md(self, md_id: int):
+        from bili_clipboard_dolby import resolve_md
+        bvid, cid, full_title = resolve_md(self.session, md_id)
+        self._log(f"  [+] {full_title} (BV={bvid})")
+        # 媒体详情页没有 season id，无法维护剧集列表（不支持切集连播）
+        self._play_dash("媒体详情", f"md{md_id}", bvid, cid, full_title)
 
     def _play_yt(self, ytid):
         from bili_clipboard_dolby import launch_player
@@ -477,43 +486,6 @@ class App:
             launch_player(self.player_path, url, url, log=self._log)
         except Exception as e:
             self._log(f"    [!] YT launch 失败: {e}")
-
-    def _play_ss(self, ss_id: int):
-        from bili_clipboard_dolby import (get_playurl, pick_dolby_streams,
-                                          launch_player, resolve_ss,
-                                          fetch_episode_list, set_episode_state)
-        bvid, cid, full_title = resolve_ss(self.session, ss_id)
-        self._log(f"  [+] {full_title} (BV={bvid})")
-        try:
-            eps = fetch_episode_list(self.session, "ss", ss_id)
-            index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
-            set_episode_state(eps, index, {
-                "session": self.session, "img_key": self.img_key,
-                "sub_key": self.sub_key, "sessdata": self.sessdata,
-            })
-        except Exception:
-            pass
-        data = get_playurl(self.session, bvid, cid, self.img_key, self.sub_key)
-        dash = data.get("dash")
-        if not dash:
-            self._log("  [!] 无 DASH 数据")
-            return
-        vurl, aurl, vd, ad = pick_dolby_streams(dash)
-        self._add_history("番剧合集", f"ss{ss_id}", full_title, vd, ad or "普通音频")
-        launch_player(self.player_path, vurl, full_title, audio_url=aurl, sessdata=self.sessdata, log=self._log)
-
-    def _play_md(self, md_id: int):
-        from bili_clipboard_dolby import get_playurl, pick_dolby_streams, launch_player, resolve_md
-        bvid, cid, full_title = resolve_md(self.session, md_id)
-        self._log(f"  [+] {full_title} (BV={bvid})")
-        data = get_playurl(self.session, bvid, cid, self.img_key, self.sub_key)
-        dash = data.get("dash")
-        if not dash:
-            self._log("  [!] 无 DASH 数据")
-            return
-        vurl, aurl, vd, ad = pick_dolby_streams(dash)
-        self._add_history("媒体详情", f"md{md_id}", full_title, vd, ad or "普通音频")
-        launch_player(self.player_path, vurl, full_title, audio_url=aurl, sessdata=self.sessdata, log=self._log)
 
     # ---------- 退出 ----------
     def _quit(self):

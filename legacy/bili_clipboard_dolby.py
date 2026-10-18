@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-bili_clipboard_dolby.py
+bili_clipboard_dolby.py — BiliYTPlayer 后端核心库（由 bili_yt_player.pyw 调用）
 
-后台剪贴板监听：复制 B 站链接或 BV 号 →
-  自动解析杜比视界(Dolby Vision) / 杜比全景声(Dolby Atmos) →
-  唤起本地 mpv/SMPlayer 播放。
+职责：B 站 API 鉴权（扫码登录 / WBI 签名）→ DASH 流提取与优选 →
+  构造参数唤起 mpv 播放；经 MPV 命名管道 IPC 实现切集与自动连播。
 
 不挑终端——UWP 客户端、Edge/Chrome 网页、微信/QQ 别人发的链接，复制即播。
 """
@@ -99,9 +98,7 @@ if not getattr(sys, "frozen", False):
     _install("qrcode")
 
 
-import requests                  # noqa: E402
-from dotenv import load_dotenv  # noqa: E402
-import pyperclip                # noqa: E402
+import requests  # noqa: E402
 
 
 # ============================================================================
@@ -125,13 +122,6 @@ MIXIN_KEY_ENC_TAB = [
     37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
     22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 ]
-
-BV_RE = re.compile(r"(BV[a-zA-Z0-9]{10})")
-YT_RE = re.compile(r"(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)([a-zA-Z0-9_-]{11})")
-EP_RE = re.compile(r"/ep(\d+)")
-SS_RE = re.compile(r"/ss(\d+)")
-BANGUMI_MD_RE = re.compile(r"/md(\d+)")
-P_PARAM_RE = re.compile(r"[?&]p=(\d+)")  # 分 P 参数
 
 # 视频编码权重：AV1(codecid=13) 绝对优先 > HEVC/H.265(12) > AVC/H.264(7)
 CODEC_WEIGHT = {13: 3, 12: 2, 7: 1}
@@ -293,22 +283,6 @@ def qr_login_sessdata(emit=None, draw_qr=None, on_status=None,
     return None
 
 
-def load_sessdata() -> str:
-    """读取 SESSDATA：已配置则读 .env；缺失/失效则启动 QR 扫码登录。"""
-    if ENV_PATH.exists():
-        load_dotenv(ENV_PATH)
-        sessdata = os.getenv("SESSDATA", "").strip()
-        if sessdata:
-            return sessdata
-
-    print("[*] 未检测到有效 SESSDATA，启动扫码登录…", flush=True)
-    sessdata = qr_login_sessdata()
-    if not sessdata:
-        print("[!] 扫码登录未完成，退出。", flush=True)
-        sys.exit(0)
-    return sessdata
-
-
 # ============================================================================
 # 3. 播放器检测（mpv > smplayer.exe > smplayer.lnk）
 # ============================================================================
@@ -437,22 +411,6 @@ def find_player():
 
 def _mixin_key(orig: str) -> str:
     return reduce(lambda s, i: s + orig[i], MIXIN_KEY_ENC_TAB, "")[:32]
-
-
-def get_wbi_keys(session: requests.Session):
-    resp = session.get(
-        "https://api.bilibili.com/x/web-interface/nav",
-        headers=COMMON_HEADERS,
-        timeout=5,
-    )
-    resp.raise_for_status()
-    j = resp.json()
-    if j.get("code") != 0:
-        raise RuntimeError(f"SESSDATA 过期或无效: {j.get('message', 'unknown')}")
-    d = j["data"]["wbi_img"]
-    img_key = d["img_url"].rsplit("/", 1)[-1].split(".")[0]
-    sub_key = d["sub_url"].rsplit("/", 1)[-1].split(".")[0]
-    return img_key, sub_key
 
 
 class _FastBiliSession:
@@ -591,8 +549,7 @@ def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None) ->
 
 
 def init_bili_session(sessdata: str) -> tuple:
-    """初始化 B 站会话：单次 nav API 完成 SESSDATA 验证 + WBI 签名密钥获取。
-       validate_sessdata() + get_wbi_keys() 两次 nav 调用合并为一次，省一半网络时间。"""
+    """初始化 B 站会话：单次 nav API 同时完成 SESSDATA 验证 + WBI 签名密钥获取。"""
     # 裸 socket 直连 B站，绕过本机 requests 库的代理探测开销（24s → 0.1s）
     j = _fast_bili_api("/x/web-interface/nav", sessdata)
 
@@ -609,22 +566,6 @@ def init_bili_session(sessdata: str) -> tuple:
     session.cookies.set("SESSDATA", sessdata, domain=".bilibili.com")
 
     return session, img_key, sub_key
-
-
-def validate_sessdata(sessdata: str) -> bool:
-    """检查 SESSDATA 是否有效（保留兼容，新代码建议用 init_bili_session）。"""
-    try:
-        s = requests.Session()
-        s.cookies.set("SESSDATA", sessdata, domain=".bilibili.com")
-        r = s.get(
-            "https://api.bilibili.com/x/web-interface/nav",
-            headers=COMMON_HEADERS,
-            timeout=5,
-        )
-        r.raise_for_status()
-        return r.json().get("code") == 0
-    except Exception:
-        return False
 
 
 def enc_wbi(params: dict, img_key: str, sub_key: str) -> dict:
@@ -760,12 +701,6 @@ def get_cid_and_title(session: requests.Session, bvid: str, p: int = 1) -> tuple
     return cid, title
 
 
-def get_cid(session: requests.Session, bvid: str) -> int:
-    """兼容旧接口：仅返回第一分 P 的 cid。"""
-    cid, _ = get_cid_and_title(session, bvid, p=1)
-    return cid
-
-
 def get_playurl(session: requests.Session, bvid: str, cid: int,
                 img_key: str, sub_key: str) -> dict:
     params = {
@@ -869,7 +804,7 @@ def pick_dolby_streams(dash: dict):
 
 
 # ============================================================================
-# 5.5 剧集列表 & MPV IPC 切集（< / > 前后切集 + 播完自动下一集）
+# 5.5 剧集列表 & MPV IPC 切集（Ctrl+←/→ 前后切集 + 播完自动下一集）
 # ============================================================================
 
 # MPV IPC 命名管道（--input-ipc-server=\\.\pipe\bili-mpv-ipc）
@@ -1143,7 +1078,7 @@ def _mpv_ipc_loop():
 _NAV_SIGNAL = _CONFIG_DIR / "bili-nav.signal"   # Lua 写入、Python 轮询的切集信号
 
 def _nav_signal_loop():
-    """后台线程：轮询切集信号文件（Lua 的 > / < 写入），读后删除防重复。"""
+    """后台线程：轮询切集信号文件（Lua 的 Ctrl+←/→ 写入），读后删除防重复。"""
     while True:
         try:
             if _NAV_SIGNAL.exists():
@@ -1161,7 +1096,6 @@ def _nav_signal_loop():
         except Exception:
             pass
         time.sleep(0.3)
-        time.sleep(1.5)
 
 
 def start_ipc_monitor():
@@ -1407,228 +1341,3 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
             _emit(f"    [!] {err.strip()}")
     elif code is None:
         _emit(f"    [+] mpv 正在播放: {title}")
-
-
-# ============================================================================
-# 7. 剪贴板读取 + 全链路
-# ============================================================================
-
-def read_clipboard() -> str:
-    """读取 Windows 剪贴板文本。
-       优先用 PowerShell 原生 API（最可靠），失败则回退 pyperclip。
-    """
-    # 方式 1: PowerShell Get-Clipboard（用户终端会话下最稳）
-    try:
-        r = _run_silent(
-            ["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if r.returncode == 0 and r.stdout:
-            return r.stdout
-    except Exception:
-        pass
-
-    # 方式 2: pyperclip（备选）
-    try:
-        return pyperclip.paste()
-    except Exception:
-        pass
-
-    return ""
-
-def process_bvid(session, bvid, img_key, sub_key, player_path, sessdata, p=1):
-    """B 站：CDN 直链 + mpv 透传参数。支持分 P。"""
-    print(f"  [*] 开始解析 {bvid} (P{p}) …")
-    cid, title = get_cid_and_title(session, bvid, p=p)
-    print(f"  [+] 标题: {title}")
-
-    # 维护剧集列表，供 MPV 内部切集（< / > 与播完自动下一集）
-    try:
-        eps = fetch_episode_list(session, "bili", bvid)
-        index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
-        set_episode_state(eps, index, {
-            "session": session, "img_key": img_key,
-            "sub_key": sub_key, "sessdata": sessdata,
-        })
-    except Exception:
-        pass  # 剧集列表失败不阻断播放
-
-    data = get_playurl(session, bvid, cid, img_key, sub_key)
-    dash = data.get("dash")
-    if not dash:
-        print("  [!] 未返回 DASH 数据，跳过。")
-        return
-
-    video_url, audio_url, vdesc, adesc = pick_dolby_streams(dash)
-    if not video_url:
-        print("  [!] 未能提取可播放的视频流。")
-        return
-
-    print(f"  [+] 画质: {vdesc}")
-    print(f"  [+] 音轨: {adesc if audio_url else '无'}")
-
-    launch_player(player_path, video_url, title, audio_url=audio_url, sessdata=sessdata)
-
-
-# ============================================================================
-# 主循环
-# ============================================================================
-
-def main():
-    # 无缓冲输出，确保终端实时看到日志
-    # --windowed 模式下 stdout 可能是 devnull 文件，无 reconfigure 方法，忽略即可
-    for _fh in (sys.stdout, sys.stderr):
-        try:
-            _fh.reconfigure(line_buffering=True)
-        except (AttributeError, OSError):
-            pass
-
-    print("=" * 56, flush=True)
-    print(" B 站 / YouTube 剪贴板直连播放器", flush=True)
-    print("=" * 56, flush=True)
-
-    sessdata = load_sessdata()
-
-    player_path = find_player()
-    if not player_path:
-        print("[!] 未检测到 SMPlayer/mpv，请先安装 SMPlayer。", flush=True)
-        sys.exit(1)
-    print(f"[+] 播放器: {player_path}", flush=True)
-
-    # 单次 nav API 完成鉴权 + WBI 密钥（原来 validate + get_wbi_keys 两次调用合并）
-    try:
-        session, img_key, sub_key = init_bili_session(sessdata)
-        print("[+] B 站鉴权 + WBI 签名密钥就绪。", flush=True)
-    except Exception:
-        print("[!] SESSDATA 已过期，请重新输入。", flush=True)
-        ENV_PATH.unlink(missing_ok=True)
-        sessdata = load_sessdata()
-        try:
-            session, img_key, sub_key = init_bili_session(sessdata)
-            print("[+] B 站鉴权 + WBI 签名密钥就绪。", flush=True)
-        except Exception as e:
-            print(f"[!] B 站鉴权失败: {e}", flush=True)
-            sys.exit(1)
-    print("\n[*] 开始监听剪贴板（Ctrl+C 停止）…", flush=True)
-    print("[*] 复制 B 站 / YouTube 链接即可播放。\n", flush=True)
-
-    last_vid: str = ""
-    heartbeat = 0
-
-    while True:
-        text = read_clipboard()
-
-        heartbeat += 1
-        if heartbeat >= 6:
-            heartbeat = 0
-            print(".", end="", flush=True)
-
-        # ---- B 站（支持分 P：提取 ?p= 参数，去重键 {bvid}_p{p}）----
-        m = BV_RE.search(text)
-        if m:
-            bvid = m.group(1)
-            pm = P_PARAM_RE.search(text)
-            p = int(pm.group(1)) if pm else 1
-            vid_key = f"{bvid}_p{p}"
-            if vid_key != last_vid:
-                last_vid = vid_key
-                print(f"\n>> 检测到 B 站链接: {bvid} (P{p})", flush=True)
-                try:
-                    process_bvid(session, bvid, img_key, sub_key,
-                                 player_path, sessdata, p=p)
-                except Exception as e:
-                    print(f"  [!] 播放失败: {e}", flush=True)
-            time.sleep(0.5)
-            continue
-
-        # ---- YouTube：有代理走代理，没代理直连（国外正常/国内连不上） ----
-        m = YT_RE.search(text)
-        if m:
-            ytid = m.group(1)
-            if ytid != last_vid:
-                last_vid = ytid
-                print(f"\n>> 检测到 YouTube 链接: {ytid}", flush=True)
-                url = f"https://www.youtube.com/watch?v={ytid}"
-                launch_player(player_path, url, url)
-            time.sleep(0.5)
-            continue
-
-        # ---- 番剧/电影 (EP/SS/MD) ----
-        m = EP_RE.search(text)
-        if m:
-            ep_id = m.group(1)
-            vid_key = f"ep{ep_id}"
-            if vid_key != last_vid:
-                last_vid = vid_key
-                print(f"\n>> 检测到番剧/电影 EP: {ep_id}", flush=True)
-                try:
-                    bvid, cid, full_title = resolve_episode(session, int(ep_id))
-                    print(f"  [+] {full_title} (BV={bvid})", flush=True)
-                    try:
-                        eps = fetch_episode_list(session, "ep", int(ep_id))
-                        index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
-                        set_episode_state(eps, index, {
-                            "session": session, "img_key": img_key,
-                            "sub_key": sub_key, "sessdata": sessdata,
-                        })
-                    except Exception:
-                        pass
-                    data = get_playurl(session, bvid, cid, img_key, sub_key)
-                    dash = data.get("dash")
-                    if not dash:
-                        print("  [!] 未返回 DASH 数据，跳过。", flush=True)
-                    else:
-                        video_url, audio_url, vdesc, adesc = pick_dolby_streams(dash)
-                        if video_url:
-                            print(f"  [+] 画质: {vdesc}", flush=True)
-                            print(f"  [+] 音轨: {adesc if audio_url else '无'}", flush=True)
-                            launch_player(player_path, video_url, full_title, audio_url=audio_url, sessdata=sessdata)
-                        else:
-                            print("  [!] 未能提取可播放的视频流。", flush=True)
-                except Exception as e:
-                    print(f"  [!] 播放失败: {e}", flush=True)
-            time.sleep(0.5)
-            continue
-
-        # ---- 番剧/剧集 (SS) ----
-        m = SS_RE.search(text)
-        if m:
-            ss_id = m.group(1)
-            vid_key = f"ss{ss_id}"
-            if vid_key != last_vid:
-                last_vid = vid_key
-                print(f"\n>> 检测到番剧 SS: {ss_id}", flush=True)
-                try:
-                    bvid, cid, full_title = resolve_ss(session, int(ss_id))
-                    print(f"  [+] {full_title} (BV={bvid})", flush=True)
-                    try:
-                        eps = fetch_episode_list(session, "ss", int(ss_id))
-                        index = next((i for i, e in enumerate(eps) if e.get("cid") == cid), 0)
-                        set_episode_state(eps, index, {
-                            "session": session, "img_key": img_key,
-                            "sub_key": sub_key, "sessdata": sessdata,
-                        })
-                    except Exception:
-                        pass
-                    data = get_playurl(session, bvid, cid, img_key, sub_key)
-                    dash = data.get("dash")
-                    if not dash:
-                        print("  [!] 未返回 DASH 数据，跳过。", flush=True)
-                    else:
-                        video_url, audio_url, vdesc, adesc = pick_dolby_streams(dash)
-                        if video_url:
-                            print(f"  [+] 画质: {vdesc}", flush=True)
-                            print(f"  [+] 音轨: {adesc if audio_url else '无'}", flush=True)
-                            launch_player(player_path, video_url, full_title, audio_url=audio_url, sessdata=sessdata)
-                        else:
-                            print("  [!] 未能提取可播放的视频流。", flush=True)
-                except Exception as e:
-                    print(f"  [!] 播放失败: {e}", flush=True)
-            time.sleep(0.5)
-            continue
-
-        time.sleep(0.5)
-
-
-if __name__ == "__main__":
-    main()
