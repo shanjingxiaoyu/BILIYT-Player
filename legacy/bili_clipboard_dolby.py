@@ -284,42 +284,11 @@ def qr_login_sessdata(emit=None, draw_qr=None, on_status=None,
 
 
 # ============================================================================
-# 3. 播放器检测（mpv > smplayer.exe > smplayer.lnk）
+# 3. 播放器检测（只找 mpv.exe：便携版 > 独立安装版 > PATH）
 # ============================================================================
 
-def _search_registry_install_path(keyword: str) -> str | None:
-    """搜 Windows 注册表卸载信息，找 mpv/SMPlayer 安装路径。"""
-    try:
-        import winreg
-    except ImportError:
-        return None
-    roots = [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]
-    subkeys = [
-        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
-    ]
-    for root in roots:
-        for sk in subkeys:
-            try:
-                with winreg.OpenKey(root, sk) as key:
-                    for i in range(winreg.QueryInfoKey(key)[0]):
-                        try:
-                            name = winreg.EnumKey(key, i)
-                            with winreg.OpenKey(key, name) as sub:
-                                disp, _ = winreg.QueryValueEx(sub, "DisplayName")
-                                if keyword.lower() in str(disp).lower():
-                                    loc, _ = winreg.QueryValueEx(sub, "InstallLocation")
-                                    if loc:
-                                        return str(loc)
-                        except OSError:
-                            continue
-            except OSError:
-                continue
-    return None
-
-
 def find_player():
-    """多级探测 mpv。优先级: 自带便携版 > 独立安装版 > SMPlayer 自带 > PATH > 注册表 > 广搜。
+    """多级探测 mpv。优先级: 自带便携版 > 独立安装版 > PATH。
        返回 mpv.exe 绝对路径,找不到返 None。
     """
     drives = ["C:", "D:", "E:"]
@@ -348,59 +317,8 @@ def find_player():
     # PATH 中的 mpv（可能是 winget/scoop/choco 安装的）
     mpv_in_path = which("mpv")
     if mpv_in_path and os.path.isfile(mpv_in_path):
-        # 确保不是 SMPlayer 目录下的 mpv.com（那是 mplayer 兼容层）
         if os.path.basename(mpv_in_path).lower() == "mpv.exe":
             return mpv_in_path
-
-    def _mpv_near(sm_path):
-        """从 smplayer.exe 路径推导它自带的 mpv.exe"""
-        mpv_try = os.path.join(os.path.dirname(sm_path), "mpv", "mpv.exe")
-        if os.path.isfile(mpv_try):
-            return mpv_try
-        return None
-
-    # ---- 1. SMPlayer 固定路径（备用） ----
-    for d in drives:
-        for sub in ["Program Files", "Program Files (x86)", "MSplayer"]:
-            sm = os.path.join(d + os.sep, sub, "SMPlayer", "smplayer.exe")
-            if os.path.isfile(sm):
-                mpv = _mpv_near(sm) or sm  # 没自带 mpv 就回退到 smplayer
-                return mpv
-
-    # ---- 2. PATH ----
-    p = which("smplayer")
-    if p:
-        return _mpv_near(p) or p
-
-    # ---- 3. 注册表 ----
-    loc = _search_registry_install_path("smplayer")
-    if loc:
-        sm_try = os.path.join(loc, "smplayer.exe")
-        if os.path.isfile(sm_try):
-            return _mpv_near(sm_try) or sm_try
-
-    # ---- 4. 广搜 Program Files ----
-    for d in drives:
-        for sub in ["Program Files", "Program Files (x86)"]:
-            base = os.path.join(d + os.sep, sub)
-            if not os.path.isdir(base):
-                continue
-            for root, dirs, _ in os.walk(base):
-                depth = root.replace(base, "").count(os.sep)
-                if depth > 3:
-                    dirs.clear()
-                    continue
-                sm_try = os.path.join(root, "smplayer.exe")
-                if os.path.isfile(sm_try):
-                    return _mpv_near(sm_try) or sm_try
-
-    # ---- 5. .lnk 快捷方式 ----
-    for p in [
-        r"C:\Users\Public\Desktop\SMPlayer.lnk",
-        os.path.join(os.path.expanduser("~"), "Desktop", "SMPlayer.lnk"),
-    ]:
-        if os.path.isfile(p):
-            return p  # .lnk 没法推导 mpv，直接返回
 
     return None
 

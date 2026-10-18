@@ -269,8 +269,8 @@ class App:
     def _ask_player_and_init(self):
         """在主线程弹出文件对话框,然后继续初始化。"""
         path = filedialog.askopenfilename(
-            title="请手动选择 mpv.exe（通常在 SMPlayer 安装目录的 mpv 子目录下）",
-            filetypes=[("mpv", "mpv.exe"), ("SMPlayer", "smplayer.exe"), ("所有文件", "*.*")],
+            title="未找到 mpv.exe，请手动选择（推荐用便携版 mpv）",
+            filetypes=[("mpv", "mpv.exe"), ("所有文件", "*.*")],
         )
         if path:
             self._continue_init(path)
@@ -403,19 +403,19 @@ class App:
         try:
             if _type == "bili":
                 self._log(f">> B 站: {raw_id}" + (f" (P{extra})" if extra else ""))
-                self._play_bili(raw_id, extra or 1)
+                self._play_bili_id("bili", raw_id, extra or 1)
             elif _type == "yt":
                 self._log(f">> YouTube: {raw_id}")
                 self._play_yt(raw_id)
             elif _type == "ep":
                 self._log(f">> 番剧/电影 EP: {raw_id}")
-                self._play_episode(int(raw_id))
+                self._play_bili_id("ep", int(raw_id))
             elif _type == "ss":
                 self._log(f">> 番剧合集 SS: {raw_id}")
-                self._play_ss(int(raw_id))
+                self._play_bili_id("ss", int(raw_id))
             elif _type == "md":
                 self._log(f">> 媒体详情 MD: {raw_id}")
-                self._play_md(int(raw_id))
+                self._play_bili_id("md", int(raw_id))
         except Exception as e:
             self._log(f"  [!] {e}")
 
@@ -451,32 +451,35 @@ class App:
         launch_player(self.player_path, vurl, title, audio_url=aurl,
                       sessdata=self.sessdata, log=self._log)
 
-    def _play_bili(self, bvid, p=1):
-        from bili_clipboard_dolby import get_cid_and_title
-        cid, title = get_cid_and_title(self.session, bvid, p=p)
-        self._setup_episodes("bili", bvid, cid)
-        self._play_dash("B站", f"{bvid}_p{p}", bvid, cid, title)
+    def _play_bili_id(self, kind, raw_id, p=1):
+        """B 站各 ID 类型统一入口：解析 → （剧集列表）→ DASH 播放。
 
-    def _play_episode(self, ep_id: int):
-        from bili_clipboard_dolby import resolve_episode
-        bvid, cid, full_title = resolve_episode(self.session, ep_id)
-        self._log(f"  [+] {full_title} (BV={bvid})")
-        self._setup_episodes("ep", ep_id, cid)
-        self._play_dash("番剧", f"ep{ep_id}", bvid, cid, full_title)
-
-    def _play_ss(self, ss_id: int):
-        from bili_clipboard_dolby import resolve_ss
-        bvid, cid, full_title = resolve_ss(self.session, ss_id)
-        self._log(f"  [+] {full_title} (BV={bvid})")
-        self._setup_episodes("ss", ss_id, cid)
-        self._play_dash("番剧合集", f"ss{ss_id}", bvid, cid, full_title)
-
-    def _play_md(self, md_id: int):
-        from bili_clipboard_dolby import resolve_md
-        bvid, cid, full_title = resolve_md(self.session, md_id)
-        self._log(f"  [+] {full_title} (BV={bvid})")
-        # 媒体详情页没有 season id，无法维护剧集列表（不支持切集连播）
-        self._play_dash("媒体详情", f"md{md_id}", bvid, cid, full_title)
+        kind: bili(BV) / ep(单集) / ss(合集) / md(媒体详情)。四套逻辑合并于此，
+        以后改播放链路只动这一个方法。md 无 season id，不支持切集连播。
+        """
+        from bili_clipboard_dolby import (
+            get_cid_and_title, resolve_episode, resolve_ss, resolve_md,
+        )
+        if kind == "bili":
+            cid, title = get_cid_and_title(self.session, raw_id, p=p)
+            bvid, label, platform, eptype = raw_id, f"{raw_id}_p{p}", "B站", ("bili", raw_id)
+        elif kind == "ep":
+            bvid, cid, title = resolve_episode(self.session, raw_id)
+            label, platform, eptype = f"ep{raw_id}", "番剧", ("ep", raw_id)
+        elif kind == "ss":
+            bvid, cid, title = resolve_ss(self.session, raw_id)
+            label, platform, eptype = f"ss{raw_id}", "番剧合集", ("ss", raw_id)
+        elif kind == "md":
+            bvid, cid, title = resolve_md(self.session, raw_id)
+            label, platform, eptype = f"md{raw_id}", "媒体详情", None
+        else:
+            raise ValueError(f"未知播放类型: {kind}")
+        self._log(f"  [+] {title} (BV={bvid})")
+        if eptype:
+            self._setup_episodes(*eptype, cid)
+        else:
+            self._log("  [*] 媒体详情页无 season id，不支持切集连播")
+        self._play_dash(platform, label, bvid, cid, title)
 
     def _play_yt(self, ytid):
         from bili_clipboard_dolby import launch_player
