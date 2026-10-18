@@ -280,7 +280,7 @@ class App:
 
     def _continue_init(self, player_path):
         """播放器已确定，继续初始化 B 站鉴权和监听。"""
-        from bili_clipboard_dolby import init_bili_session
+        from bili_clipboard_dolby import init_bili_session, SessdataInvalid
 
         self.player_path = player_path
         self._log(f"[+] 播放器: {player_path}")
@@ -291,7 +291,8 @@ class App:
         try:
             self.session, self.img_key, self.sub_key = init_bili_session(self.sessdata)
             self._log("[+] B 站鉴权就绪。")
-        except Exception as e:
+        except SessdataInvalid as e:
+            # 仅"登录态无效"才删 .env 跳扫码；网络异常不删（见 SessdataInvalid 注释）
             self._log(f"[!] B 站鉴权失败: {e}")
             self._log("[*] SESSDATA 已过期，正在弹出扫码登录…")
             ENV_PATH.unlink(missing_ok=True)
@@ -317,6 +318,12 @@ class App:
                 self._log(f"[!] B 站鉴权仍然失败: {e2}")
                 self.root.after(0, lambda: self.pause_btn.configure(state="disabled"))
                 return
+        except Exception as e:
+            # 网络类异常：保留 .env（登录态还有效），B 站暂不可用，YouTube 不受影响
+            self._log(f"[!] B 站 API 网络异常，登录态已保留: {e}")
+            self._log("[*] 检查网络后重启即可；B 站链接暂不可播放，YouTube 不受影响。")
+            self.root.after(0, lambda: self.pause_btn.configure(state="disabled"))
+            return
 
         self._log("[*] 监听中 — 复制 B 站 / YouTube 链接即可播放。")
         self.root.after(0, lambda: self.pause_btn.configure(text="暂停监听", state="normal"))

@@ -507,13 +507,20 @@ def _fast_bili_api(path: str, sessdata: str = "", extra_headers: dict = None,
     return json.loads(body)
 
 
+class SessdataInvalid(RuntimeError):
+    """SESSDATA 缺失/过期/无效（nav API 返回非 0）。仅此异常触发扫码重登，
+    网络类异常不得删除 .env——否则一次抖动就弄丢有效登录态。"""
+
+
 def init_bili_session(sessdata: str) -> tuple:
     """初始化 B 站会话：单次 nav API 同时完成 SESSDATA 验证 + WBI 签名密钥获取。"""
     # 裸 socket 直连 B站，绕过本机 requests 库的代理探测开销（24s → 0.1s）
     j = _fast_bili_api("/x/web-interface/nav", sessdata)
 
     if j.get("code") != 0:
-        raise RuntimeError(f"SESSDATA 过期或无效 (code={j.get('code')}): {j.get('message', 'unknown')}")
+        raise SessdataInvalid(
+            f"SESSDATA 过期或无效 (code={j.get('code')}): {j.get('message', 'unknown')}"
+        )
 
     # 提取 WBI 签名密钥
     d = j["data"]["wbi_img"]
