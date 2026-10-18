@@ -1156,6 +1156,77 @@ def _resolve_proxy_url(emit=None) -> tuple[str | None, str | None]:
     return raw_proxy, raw_proxy
 
 
+# ---- YouTube 限流探测 ------------------------------------------------------
+# 2026-10-19 实测（代理出口被 YouTube 标记的会话）：
+# android_vr 等默认 client 拿到的播放地址，CDN（gvs）只放行每个 URL 的前
+# ~2.5MB——无 Range / 开放 Range / 中段 Range 全部 403，mpv（固定发
+# Range: bytes=0-）必然失败，表现为"mpv 窗口一闪即逝"。
+# 换 player_client=android 拿到的地址不受此限制（代价：最高 360p muxed）。
+# 本函数播放前探测一次（每会话缓存），决定 ytdl_hook 用哪个 client。
+
+_YT_THROTTLED: bool | None = None
+
+
+def _probe_url_range(url: str, start: int, end: int, proxy: str,
+                     headers: dict = None) -> int:
+    """经代理对 url 发一次有界 Range 请求，返回 HTTP 状态码。失败返回 0。"""
+    import http.client
+    try:
+        parsed = urllib.parse.urlparse(url)
+        p = urllib.parse.urlparse(proxy)
+        conn = http.client.HTTPSConnection(
+            p.hostname, p.port or 80, timeout=15
+        )
+        try:
+            conn.set_tunnel(parsed.hostname, parsed.port or 443)
+            hdrs = dict(headers or {})
+            hdrs["Range"] = f"bytes={start}-{end}"
+            hdrs.setdefault("Accept", "*/*")
+            conn.request("GET", parsed.path + ("?" + parsed.query if parsed.query else ""),
+                         headers=hdrs)
+            resp = conn.getresponse()
+            resp.read()
+            return resp.status
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+
+def _yt_is_throttled(ytdlp_exe: str, page_url: str, proxy: str,
+                     log=None) -> bool:
+    """解析一次视频，抽中段范围探测 CDN 是否限流。异常时按不限流处理。"""
+    global _YT_THROTTLED
+    if _YT_THROTTLED is not None:
+        return _YT_THROTTLED
+    try:
+        cmd = [ytdlp_exe, "--no-warnings", "-J", "--no-playlist",
+               "--format", "bestvideo[height<=2160]+bestaudio/best"]
+        if proxy:
+            cmd.append(f"--proxy={proxy}")
+        cmd += ["--", page_url]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        if out.returncode != 0:
+            _YT_THROTTLED = False
+            return False
+        data = json.loads(out.stdout)
+        fmts = data.get("requested_formats") or [data]
+        f = next((x for x in fmts if x.get("vcodec") != "none"), None) or fmts[0]
+        url = f.get("url")
+        size = f.get("filesize") or f.get("filesize_approx")
+        if not url or not size or size < 4 * 1024 * 1024:
+            _YT_THROTTLED = False
+            return False
+        mid = size // 2
+        status = _probe_url_range(url, mid, mid + 1024 * 1024 - 1, proxy,
+                                  f.get("http_headers"))
+        _YT_THROTTLED = (status != 206)
+        return _YT_THROTTLED
+    except Exception:
+        _YT_THROTTLED = False
+        return False
+
+
 def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, log=None):
     """唤起 mpv 播放。B 站（有 sessdata）走 CDN 直链 + cookie；YouTube（无 sessdata）走 ytdl_hook + 代理。
 
@@ -1228,6 +1299,10 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
             _emit(f"    [→] mpv 代理: {mpv_proxy}")
         if ytdlp_proxy and ytdlp_proxy != mpv_proxy:
             _emit(f"    [→] yt-dlp 代理: {ytdlp_proxy}")
+        # 限流会话探测：默认 client 的地址被 CDN 锁前 2.5MB 时换 android client
+        if _yt_is_throttled(ytdlp_exe, video_url, ytdlp_proxy or "", _emit):
+            ytdl_opts += ",extractor-args=youtube:player_client=android"
+            _emit("    [!] 检测到 YouTube 限流，切换 android client（最高 360p）")
         cmd += [
             f"--script-opts=ytdl_hook-ytdl_path={ytdlp_exe}",
             "--ytdl-format=bestvideo[height<=2160]+bestaudio/best",
