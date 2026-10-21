@@ -92,7 +92,6 @@ class App:
 
         self.sessdata = None
         self.running = False
-        self.paused = False
         self.task_queue: queue.Queue = queue.Queue()
         self.recent_ids: deque[str] = deque(maxlen=20)
 
@@ -146,8 +145,8 @@ class App:
         btn_frame = ttk.Frame(self.main_frame)
         btn_frame.pack(fill="x", pady=(10, 0))
 
-        self.pause_btn = ttk.Button(btn_frame, text="暂停监听", command=self.toggle_pause)
-        self.pause_btn.pack(side="left")
+        self.refresh_btn = ttk.Button(btn_frame, text="刷新监听", command=self.refresh_monitor)
+        self.refresh_btn.pack(side="left")
 
         ttk.Button(btn_frame, text="重新登录", command=self._relogin).pack(side="left", padx=6)
 
@@ -206,8 +205,8 @@ class App:
             self._log("[+] 重新登录成功，B 站鉴权已切换。")
             # 启动时若因网络异常没进入监听态，借此恢复
             if not self.running:
-                self.root.after(0, lambda: self.pause_btn.configure(
-                    text="暂停监听", state="normal"))
+                self.root.after(0, lambda: self.refresh_btn.configure(
+                    text="刷新监听", state="normal"))
                 self.start_monitor()
 
         threading.Thread(target=do_init, daemon=True).start()
@@ -300,7 +299,7 @@ class App:
             self._continue_init(path)
         else:
             self._log("[!] 未选择播放器,功能不可用。")
-            self.root.after(0, lambda: self.pause_btn.configure(state="disabled"))
+            self.root.after(0, lambda: self.refresh_btn.configure(state="disabled"))
 
     def _continue_init(self, player_path):
         """播放器已确定，继续初始化 B 站鉴权和监听。"""
@@ -340,17 +339,17 @@ class App:
                 self._log("[+] B 站鉴权就绪。")
             except Exception as e2:
                 self._log(f"[!] B 站鉴权仍然失败: {e2}")
-                self.root.after(0, lambda: self.pause_btn.configure(state="disabled"))
+                self.root.after(0, lambda: self.refresh_btn.configure(state="disabled"))
                 return
         except Exception as e:
             # 网络类异常：保留 .env（登录态还有效），B 站暂不可用，YouTube 不受影响
             self._log(f"[!] B 站 API 网络异常，登录态已保留: {e}")
             self._log("[*] 检查网络后重启即可；B 站链接暂不可播放，YouTube 不受影响。")
-            self.root.after(0, lambda: self.pause_btn.configure(state="disabled"))
+            self.root.after(0, lambda: self.refresh_btn.configure(state="disabled"))
             return
 
         self._log("[*] 监听中 — 复制 B 站 / YouTube 链接即可播放。")
-        self.root.after(0, lambda: self.pause_btn.configure(text="暂停监听", state="normal"))
+        self.root.after(0, lambda: self.refresh_btn.configure(text="刷新监听", state="normal"))
         self.root.after(0, self.start_monitor)
 
     # ---------- 监听控制 ----------
@@ -366,7 +365,6 @@ class App:
         if self.running:
             return
         self.running = True
-        self.paused = False
         # 监听线程：轻量，只读剪贴板 + 正则匹配 → 入队
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
@@ -374,14 +372,10 @@ class App:
         self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self.worker_thread.start()
 
-    def toggle_pause(self):
-        self.paused = not self.paused
-        if self.paused:
-            self.pause_btn.configure(text="恢复监听")
-            self._log("[*] 已暂停监听。")
-        else:
-            self.pause_btn.configure(text="暂停监听")
-            self._log("[*] 已恢复监听。")
+    def refresh_monitor(self):
+        """清空去重记录：之前复制过的链接可被重新识别播放。"""
+        self.recent_ids.clear()
+        self._log("[*] 已刷新监听：历史记录已清空，剪贴板上的链接可重新识别。")
 
     def _match_link(self, text: str):
         """从剪贴板文本中匹配链接，返回 (type, raw_id, extra) 或 None。
@@ -399,9 +393,6 @@ class App:
     def _monitor_loop(self):
         """监听线程：只做剪贴板读取 + 正则匹配，检测到新链接就入队，不做任何网络请求。"""
         while self.running:
-            if self.paused:
-                time.sleep(0.3)
-                continue
             text = _read_clipboard()
             result = self._match_link(text)
             if result:
@@ -422,10 +413,6 @@ class App:
             try:
                 task = self.task_queue.get(timeout=1.0)
             except queue.Empty:
-                continue
-            if self.paused:
-                self.task_queue.put(task)
-                time.sleep(0.5)
                 continue
             self._process_task(task)
 
