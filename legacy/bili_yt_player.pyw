@@ -559,7 +559,37 @@ def _read_clipboard() -> str:
     return ""
 
 
+def _ensure_single_instance():
+    """单实例守卫：已有实例在运行时，把它提到前台并退出当前进程。
+
+    防止双击/三击启动出多个实例——多个实例会读到同一条剪贴板链接，
+    各自唤起一个 mpv 重复播放。
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    ERROR_ALREADY_EXISTS = 183
+    # 句柄存到全局，随进程生命周期存在；进程退出后由系统回收
+    global _INSTANCE_MUTEX
+    _INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, "Local\\BiliYTPlayer_SingleInstance")
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.FindWindowW(None, "剪贴板直连播放器 — B站 / YouTube")
+            if hwnd:
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+        sys.exit(0)
+
+
+_INSTANCE_MUTEX = None
+
+
 if __name__ == "__main__":
+    _ensure_single_instance()
     try:
         App()
         tk.mainloop()
