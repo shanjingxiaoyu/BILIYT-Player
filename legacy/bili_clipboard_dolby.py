@@ -1308,7 +1308,7 @@ def _yt_is_throttled(ytdlp_exe: str, page_url: str, proxy: str,
         if proxy:
             cmd.append(f"--proxy={proxy}")
         cmd += ["--", page_url]
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        out = _run_silent(cmd, capture_output=True, text=True, timeout=90)
         if out.returncode != 0:
             _YT_THROTTLED = False
             return False
