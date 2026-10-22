@@ -534,6 +534,13 @@ def _read_clipboard() -> str:
             CF_UNICODETEXT = 13
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
+            # 64 位下句柄/指针可能超 32 位：不设 restype 会被 ctypes 截断成 int，
+            # GlobalLock 拿到截断指针 → wstring_at 访问冲突 → 静默回退 pyperclip，
+            # 快路径形同虚设（2026-10-23 审查发现）。
+            user32.GetClipboardData.restype = ctypes.c_void_p
+            kernel32.GlobalLock.restype = ctypes.c_void_p
+            kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+            kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
             if not user32.OpenClipboard(0):
                 return ""
             try:
