@@ -1139,6 +1139,44 @@ def start_ipc_monitor():
 # 6. 唤起播放器
 # ============================================================================
 
+# 会话级跟踪当前 mpv 进程：新播放前清退旧实例，防双开 + IPC 管道冲突
+_MPV_PROC = None
+
+
+def _quit_previous_mpv(timeout: float = 2.0):
+    """新播放前清退旧 mpv。
+
+    优先走 IPC 管道发 quit（优雅退出：正常释放命名管道 + WASAPI 独占音频设备），
+    覆盖两种旧实例：本会话启动的、以及上次应用退出留下的孤儿（孤儿仍占管道，
+    能收到 quit）。确认管道释放后才返回；跟踪到的进程超时未死则强杀兜底。
+    """
+    global _MPV_PROC
+    # 管道被占 = 有旧 mpv（含孤儿）在运行
+    probe = _pipe_open(timeout_ms=200)
+    if probe:
+        _pipe_close(probe)
+        _ipc_send_cmd(["quit"])
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            h = _pipe_open(timeout_ms=100)
+            if not h:
+                break  # 管道已释放，旧 mpv 已退出
+            _pipe_close(h)
+            time.sleep(0.1)
+    # 跟踪到的进程仍存活 → 强杀兜底
+    proc = _MPV_PROC
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    _MPV_PROC = None
+
+
 def _pause_browser_media():
     """发送 Windows 媒体暂停键(VK_MEDIA_PLAY_PAUSE),浏览器会响应暂停视频。"""
     if sys.platform != "win32":
@@ -1416,6 +1454,8 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
         ]
 
     _emit(f"    唤起 mpv: {title}")
+    # 先清退旧 mpv（双开会抢 IPC 管道导致切集/连播失效，且双窗口混播）
+    _quit_previous_mpv()
     # 先发媒体暂停键让浏览器视频暂停,再启动 mpv(避免 mpv 也收到暂停)
     _pause_browser_media()
     time.sleep(0.2)
@@ -1424,6 +1464,8 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
     if sys.platform == "win32":
         popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
     proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, **popen_kw)
+    global _MPV_PROC
+    _MPV_PROC = proc
 
     # 启动 IPC 监听线程：支持 < / > 切集 + 播完自动下一集（幂等）
     start_ipc_monitor()
