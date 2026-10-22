@@ -123,7 +123,10 @@ MIXIN_KEY_ENC_TAB = [
     22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 ]
 
-# 视频编码权重：AV1(codecid=13) 绝对优先 > HEVC/H.265(12) > AVC/H.264(7)
+# 视频编码权重：仅作同分辨率、码率接近时的决胜手（AV1>HEVC>AVC）。
+# 注意：不再是绝对优先。2026-10-22 实测 B 站 4K 档给 AVC 的码率是 AV1 的
+# 2.2~3.3 倍（9273/3333/2784kbps 等三组数据），AV1 的效率优势补不回 3 倍
+# 码率差，码率优先才是画质最高。详见 git log。
 CODEC_WEIGHT = {13: 3, 12: 2, 7: 1}
 
 
@@ -705,7 +708,7 @@ def _stream_url(item) -> str | None:
 def pick_dolby_streams(dash: dict):
     """提取视频/音频流 —— 画质为先，AV1 绝对优先。
 
-    视频流: 按 (分辨率 id, CODEC_WEIGHT 编码权重, bandwidth 码率) 联合降序取首条。
+    视频流: 按 (分辨率 id, bandwidth 码率, CODEC_WEIGHT 编码权重) 联合降序取首条。
             codecid 13=AV1 极清 > 12=HEVC/H.265 > 7=AVC/H.264。
             杜比视界仅作备选（易黑屏，无普通流时才用）。
     音频流: 杜比全景声 > FLAC 无损 > 最高码率普通音频。
@@ -716,15 +719,15 @@ def pick_dolby_streams(dash: dict):
 
     dolby = dash.get("dolby") or {}
 
-    # ── 视频流：联合降序 (id, codec_weight, bandwidth) ──
+    # ── 视频流：联合降序 (id, bandwidth, codec_weight) —— 码率优先 ──
     vids = dash.get("video") or []
     if vids:
         best = sorted(
             vids,
             key=lambda x: (
                 x.get("id", 0),
-                CODEC_WEIGHT.get(x.get("codecid"), 0),
                 x.get("bandwidth", 0),
+                CODEC_WEIGHT.get(x.get("codecid"), 0),
             ),
             reverse=True,
         )[0]

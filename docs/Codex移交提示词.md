@@ -56,7 +56,7 @@
 6. **mpv 播放参数只改 mpv.conf**，禁止在 Python 源码里写死渲染/HDR/音频参数（用户明确要求，涉及 OLED 主屏 + SDR 副屏的 HDR tone-mapping 分级，参数已调好）。
 7. **自动连播机制**：`keep-open=yes` 会抑制 `end-file`，连播靠 `observe_property('eof-reached')`；`keep-open-pause=no` 是续播前提（EOF 暂停态会被 loadfile 的新文件继承导致卡暂停）；切集用 `loadfile` + `audio-add select`，loadfile 后等 ~1 秒再挂音轨。别在切集代码里补 `set pause no`——会抢用户手动暂停的控制权。
 8. **SESSDATA / .env**：登录态无效（SessdataInvalid）才删 .env 跳扫码；网络异常必须保留 .env。GUI 上「重新登录」按钮（原「清空历史」）可在运行中热替换会话。
-9. **流优先级**：AV1 (codecid=13) > HEVC (12) > AVC (7)，权重 `{13:3, 12:2, 7:1}`。
+9. **流优先级**：同分辨率下**码率(bandwidth)优先**，编码权重 `{13:3, 12:2, 7:1}` 仅作码率接近时的决胜手（AV1>HEVC>AVC）。2026-10-22 实测：B 站给 4K AVC 的码率是 AV1 的 2.2~3.3 倍，AV1 效率优势补不回码率差，码率优先=画质最高。别再改回编码绝对优先。
 10. **测试陷阱**：`--length=N` 会对每个 loadfile 新文件生效导致级联跳集（是测试手法问题不是 bug）；B 站 CDN 直连下载必须带 Referer + cookies 否则 403。
 
 ### 常见任务速查
