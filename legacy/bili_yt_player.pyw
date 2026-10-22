@@ -67,7 +67,7 @@ _CONFIG_DIR = Path(os.environ.get("APPDATA", str(_exe_dir))) / "BiliYTPlayer"
 _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 ENV_PATH = _CONFIG_DIR / ".env"
 BV_RE = re.compile(r"(BV[a-zA-Z0-9]{10})")
-YT_RE = re.compile(r"(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)([a-zA-Z0-9_-]{11})")
+YT_RE = re.compile(r"(?:youtube\.com/(?:watch\?v=|shorts/|live/)|youtu\.be/)([a-zA-Z0-9_-]{11})")
 EP_RE = re.compile(r"/ep(\d+)")
 P_PARAM_RE = re.compile(r"[?&]p=(\d+)")  # 分 P 参数
 
@@ -203,6 +203,14 @@ class App:
             self.sessdata = sd
             self.session, self.img_key, self.sub_key = session, img_key, sub_key
             self._log("[+] 重新登录成功，B 站鉴权已切换。")
+            # 同步切集上下文：否则换账号后 Ctrl+←→/自动连播仍用旧 session 调 API
+            try:
+                from bili_clipboard_dolby import _EPISODE_STATE
+                ctx = _EPISODE_STATE.get("ctx")
+                if ctx:
+                    ctx.update(self._episode_ctx())  # 保留 pgc 等既有字段
+            except Exception:
+                pass
             # 启动时若因网络异常没进入监听态，借此恢复
             if not self.running:
                 self.root.after(0, lambda: self.refresh_btn.configure(
