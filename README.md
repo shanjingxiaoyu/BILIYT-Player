@@ -8,6 +8,7 @@
 ```
 bili_yt_player.pyw      GUI 入口（tkinter），剪贴板监听 + 工作线程（生产者-消费者）
 bili_clipboard_dolby.py 后端核心：B 站 API 鉴权 / WBI 签名 / DASH 流提取 / mpv 启动参数
+bili-ipc.lua            mpv 插件：Ctrl+←/→ 切集按键 → 信号文件 → Python 执行切流
 mpv-portable/mpv.exe    播放器（所有解码、渲染、色调映射在此完成）
 mpv-portable/yt-dlp.exe YouTube URL 解析（由 mpv 内置 ytdl_hook 调用）
 config/mpv.conf         mpv 渲染 / 同步 / 缓冲 / HDR 映射配置（参考副本）
@@ -22,6 +23,8 @@ config/input.conf       mpv 快捷键配置（参考副本）
 2. 解压后双击 `BiliYTPlayer.exe`
 3. 复制 B 站 / YouTube 视频链接到剪贴板，自动播放
 4. 按 `q` 退出，`f` 全屏，`` ` `` 查看渲染统计（mpv 默认快捷键见 `config/input.conf`）
+
+可选：浏览器安装 `bili_onekey_mpv.user.js` 油猴脚本（Tampermonkey），在 B 站视频页点"⚡ MPV 播放"按钮或按 `Alt+P`，一键复制链接并唤起本地播放。
 
 ### 从源码运行
 
@@ -53,6 +56,10 @@ cd legacy
 - **YouTube 代理**：mpv 不会自动读取环境变量代理，`launch_player` 会显式传 `--http-proxy`（mpv 拉 CDN 流）和 `--ytdl-raw-options=...,proxy=`（yt-dlp 解析 URL）。代理检测支持环境变量 / Windows 系统代理 / socks5→http 端口探测 / PAC 识别
 - **HDR 动态映射**：`mpv.conf` 通过 `profile-cond` 依据视频源色彩空间自动切换 HDR10 / HLG / SDR 映射参数
 - **DASH 同步**：`video-sync=audio` 让视频服从音频时钟，避免 B 站 / YouTube 双 CDN 分离流时钟打架导致卡顿
+
+## 维护
+
+非程序员维护指南（存档/验收/发布流程）：见 [`docs/维护手册.md`](docs/维护手册.md)。开发行为准则见 [`.cursorrules`](.cursorrules)。
 
 ## 敏感信息声明
 
