@@ -31,6 +31,8 @@ BiliYTPlayer.exe
 BiliYTPlayer_old.exe
 BiliYTPlayer_release.tar.gz
 *.tar.gz
+*.zip
+*.zip.orig
 mpv-portable/
 
 # ── 日志 / 运行时数据 ─────────────────────────────────────────────────────────
@@ -47,3 +49,18 @@ Desktop.ini
 .idea/
 .vscode/
 *.swp
+
+# ui-kit 的演示 exe 不进仓库（48 MB），用 Releases 分发
+ui-kit/*.exe
+
+# ── 开发期临时探针 / 截图产物（正式自检脚本 _verify_*.py 保留）─────────────────
+_scratch/
+_probe*
+# 根目录下的 png 全是开发期截图产物（仓库内的截图在 ui-kit/ 下，不受影响）
+/*.png
+/_*.py
+!/_verify_*.py
+!/_shot*.py
+_o.txt
+_e.txt
+

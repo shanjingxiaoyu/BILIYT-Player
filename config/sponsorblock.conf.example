@@ -1,0 +1,45 @@
+# ==============================================================================
+# BiliYTPlayer — SponsorBlock（广告跳过）配置 【参考副本】
+#
+# 数据来源：https://bsbsb.top  （BilibiliSponsorBlock 公共服务器）
+#
+# 播放器实际读取的是（缺失时自动生成）：
+#   %APPDATA%\BiliYTPlayer\sponsorblock.conf
+# 建议用 GUI 的「跳过设置…」按钮修改，避免格式出错。
+# 改完配置后，播放下一个视频即生效（无需重启）。
+# ==============================================================================
+
+# 是否启用广告跳过。false = 完全不查询 API，行为与未接入前一致
+enabled = true
+
+# ── 分类跳过档位 ─────────────────────────────────────────────────────────────
+# 每个分类四种档位：
+#   auto        自动跳过（进入片段即跳，3 秒内可按 Enter 撤销）
+#   manual      手动跳过（进度条显色，按 n 键跳）
+#   bar         仅在进度条显示色块，不跳过
+#   prohibited  完全禁用
+categories = sponsor:auto, selfpromo:auto, exclusive_access:bar, interaction:manual, poi_highlight:manual, intro:manual, outro:manual, preview:bar, filler:auto, music_offtopic:auto, padding:auto
+
+# 命中片段时的动作：skip = 跳过；mute = 静音但不跳过
+behavior = skip
+
+# 跳到片段时是否在画面上显示提示（含 3 秒撤销倒计时）
+notify = true
+
+# 自动跳过时，允许按 Enter 撤销的秒数
+undo_seconds = 3.0
+
+# 短于该秒数的片段忽略（防止抖动）
+min_duration = 1.0
+
+# API 服务器地址
+server = https://bsbsb.top
+
+# 查询超时（秒）。建议不超过 3，否则会拖慢起播
+timeout = 2.5
+
+# 是否向服务器上报「已跳过」次数（仅统计，默认关闭以保护隐私）
+report_views = false
+
+# 输出调试日志到 mpv.log
+debug = false

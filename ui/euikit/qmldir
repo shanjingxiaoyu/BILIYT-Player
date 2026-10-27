@@ -1,0 +1,7 @@
+module EUIKit
+
+ESpringButton 1.0 ESpringButton.qml
+ESpringSwitch 1.0 ESpringSwitch.qml
+ESpringCard 1.0 ESpringCard.qml
+ESpringListDelegate 1.0 ESpringListDelegate.qml
+ESpringToast 1.0 ESpringToast.qml

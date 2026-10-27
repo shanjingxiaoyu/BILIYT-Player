@@ -100,6 +100,14 @@ import requests                  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 import pyperclip                # noqa: E402
 
+# 挑流规则只有一份实现：app/quality.py（UI 设置页与播放链路共用）。
+# 从源码运行时本文件所在目录是 legacy/，app/ 在其上一级，需要补进 sys.path。
+try:
+    from app.quality import format_pick, pick_stream, stream_bandwidth
+except ImportError:  # pragma: no cover - 取决于运行/打包目录布局
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from app.quality import format_pick, pick_stream, stream_bandwidth
+
 
 # ============================================================================
 # 1. 常量 / 配置
@@ -220,6 +228,12 @@ def find_player():
     bundled = _exe_dir / "mpv-portable" / "mpv.exe"
     if bundled.is_file():
         return str(bundled)
+
+    # ---- 0b. 从源码运行时 mpv-portable/ 位于仓库根目录（legacy/ 的上一级） ----
+    if not getattr(sys, "frozen", False):
+        repo_bundled = _exe_dir.parent / "mpv-portable" / "mpv.exe"
+        if repo_bundled.is_file():
+            return str(repo_bundled)
 
     # ---- 1. 独立安装的 mpv（最新稳定版） ----
     # winget 安装路径
@@ -577,11 +591,31 @@ def get_cid(session: requests.Session, bvid: str):
     return j["data"]["cid"], j["data"]["title"]
 
 
+def _unwrap_playurl(j: dict) -> dict:
+    """统一两个 playurl 端点的载荷位置。
+
+    x/player/wbi/playurl 把结果放 data；pgc/player/web/playurl 放 result（偶尔也放 data）。
+    """
+    payload = j.get("result")
+    if not isinstance(payload, dict) or not payload:
+        payload = j.get("data")
+    return payload if isinstance(payload, dict) else {}
+
+
 def get_playurl(session: requests.Session, bvid: str, cid: int,
-                img_key: str, sub_key: str) -> dict:
+                img_key: str, sub_key: str, qn: int = 126) -> dict:
+    """取 dash 数据，返回与端点无关的统一结构（dash / accept_quality 等）。
+
+    qn 是请求的画质档位（默认 126 = 最高请求值，旧调用方不传即维持原行为）。
+
+    番剧/影视（PGC）的 bvid+cid 在 x/player/wbi/playurl 上会返回
+    code=-404「啥都木有」——这是 PGC 内容不在普通投稿的 playurl 范围内，
+    必须回落到 pgc/player/web/playurl（同样的 WBI 签名，bvid+cid 足够，
+    不用 ep_id）。两条路径返回结构一致，调用方无需感知来源。
+    """
     params = {
         "bvid": bvid, "cid": cid,
-        "qn": 126, "fnver": 0, "fnval": 4048, "fourk": 1,
+        "qn": qn, "fnver": 0, "fnval": 4048, "fourk": 1,
     }
     signed = enc_wbi(params, img_key, sub_key)
     resp = session.get(
@@ -592,59 +626,118 @@ def get_playurl(session: requests.Session, bvid: str, cid: int,
     )
     resp.raise_for_status()
     j = resp.json()
-    if j.get("code") != 0:
-        raise RuntimeError(f"playurl 失败: {j.get('message')} (code={j.get('code')})")
+    code = j.get("code")
     data = j.get("data")
-    if not data:
-        raise RuntimeError("playurl data 为空，该视频不支持杜比品质或需大会员")
-    return data
+    if code == 0 and data:
+        return data
+
+    # ── PGC 回落：普通端点 -404（或空 data）时再试番剧专用端点 ──
+    signed = enc_wbi(params, img_key, sub_key)
+    resp = session.get(
+        "https://api.bilibili.com/pgc/player/web/playurl",
+        params=signed,
+        headers=COMMON_HEADERS,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    j2 = resp.json()
+    code2 = j2.get("code")
+    data2 = _unwrap_playurl(j2)
+    if code2 == 0 and data2:
+        return data2
+
+    if code != 0:
+        raise RuntimeError(
+            f"playurl 失败: {j.get('message')} (code={code})；"
+            f"PGC 端点同样失败: {j2.get('message')} (code={code2})"
+        )
+    raise RuntimeError("playurl data 为空，该视频不支持杜比画质或需大会员")
 
 
-def pick_dolby_streams(dash: dict):
+def _as_stream_list(v) -> list:
+    """把 dash 里「可能是 dict / list / None」的流字段统一成 list[dict]。
+
+    B 站不同视频/端点的形状不一致：flac.audio 是单个 dict，dash.audio 是 list，
+    dolby.audio / dolby.video 实测是 dict 也可能为 null —— 一律归一，避免 [0] KeyError。
+    """
+    if isinstance(v, dict):
+        return [v] if v else []
+    if isinstance(v, list):
+        return [x for x in v if isinstance(x, dict)]
+    return []
+
+
+def _stream_url(stream) -> str | None:
+    """取一条流的播放地址：base_url → baseUrl → backup_url[0] → backupUrl[0]。
+
+    内部流对象两套驼峰/下划线字段是混着给的（dolby 段只保证 base_url/baseUrl），
+    统一在这里兜住；全空返回 None，不抛。
+    """
+    if not isinstance(stream, dict):
+        return None
+    for key in ("base_url", "baseUrl"):
+        url = stream.get(key)
+        if url:
+            return str(url)
+    for key in ("backup_url", "backupUrl"):
+        backups = stream.get(key)
+        if isinstance(backups, str):
+            backups = [backups]
+        for url in backups or []:
+            if isinstance(url, str) and url:
+                return url
+    return None
+
+
+def pick_dolby_streams(dash: dict, max_qn: int = 0):
     """提取视频/音频流。
        优先普通最高清流(兼容性最好),杜比视界仅作备选(易黑屏)。
-       返回 (video_url, audio_url, vdesc, adesc)。
+       max_qn: 画质上限（0 = 不限），对应设置里的 720P/1080P 等偏好。
+       返回 (video_url, audio_url, vdesc, adesc)；脏数据不抛，最差返回 None。
     """
+    dash = dash if isinstance(dash, dict) else {}
+    raw_dolby = dash.get("dolby")
+    dolby = raw_dolby if isinstance(raw_dolby, dict) else {}
+
     video_url = audio_url = None
     vdesc = adesc = ""
 
-    dolby = dash.get("dolby") or {}
-
-    # ── 第一优先: 普通最高清视频(兼容性最好,不会黑屏) ──
-    vids = dash.get("video") or []
-    if vids:
-        best = sorted(vids, key=lambda x: (x.get("id", 0), x.get("bandwidth", 0)))[-1]
-        video_url = best.get("base_url") or (best.get("backup_url") or [None])[0]
-        vdesc = f"普通视频 id={best.get('id')} codec={best.get('codecs', '?')}"
-
-    # ── 普通最高码率音频 ──
-    auds = dash.get("audio") or []
-    if auds:
-        best = sorted(auds, key=lambda x: x.get("bandwidth", 0))[-1]
-        audio_url = best.get("base_url") or (best.get("backup_url") or [None])[0]
-        adesc = f"普通音频 id={best.get('id')}"
-
-    # ── FLAC 无损音频(如果可用,覆盖普通音频) ──
-    flac = dash.get("flac") or {}
-    fa = flac.get("audio")
-    if fa:
-        audio_url = fa.get("base_url") or (fa.get("backup_url") or [None])[0]
-        adesc = "FLAC 无损"
-
-    # ── 杜比全景声(如果可用,覆盖 FLAC) ──
-    da = dolby.get("audio")
-    if da:
-        a = da[0]
-        audio_url = a.get("base_url") or (a.get("backupUrl") or [None])[0]
-        adesc = "杜比全景声(Dolby Atmos/E-AC-3)"
+    # ── 视频: 普通流优先(兼容性最好,不会黑屏)，挑流规则见 app.quality.pick_stream ──
+    best, _why = pick_stream(_as_stream_list(dash.get("video")), max_qn)
+    if best is not None:
+        video_url = _stream_url(best)
+        vdesc = format_pick(best)
 
     # ── 杜比视界仅作为备选(易导致黑屏,不推荐自动使用) ──
-    dv = dolby.get("video")
-    if dv and not video_url:
-        # 只有找不到普通流时才用杜比视界
-        v = dv[0]
-        video_url = v.get("base_url") or (v.get("backupUrl") or [None])[0]
-        vdesc = "杜比视界(Dolby Vision) [兼容性警告]"
+    if not video_url:
+        dv, _why = pick_stream(_as_stream_list(dolby.get("video")), max_qn)
+        if dv is not None:
+            video_url = _stream_url(dv)
+            if video_url:
+                vdesc = "杜比视界(Dolby Vision) [兼容性警告]"
+
+    # ── 普通最高码率音频 ──
+    auds = _as_stream_list(dash.get("audio"))
+    if auds:
+        a = max(auds, key=stream_bandwidth)
+        audio_url = _stream_url(a)
+        adesc = f"普通音频 id={a.get('id')}"
+
+    # ── FLAC 无损音频(如果可用,覆盖普通音频) ──
+    raw_flac = dash.get("flac")
+    flac = raw_flac if isinstance(raw_flac, dict) else {}
+    fa = _as_stream_list(flac.get("audio"))
+    if fa:
+        url = _stream_url(max(fa, key=stream_bandwidth))
+        if url:
+            audio_url, adesc = url, "FLAC 无损"
+
+    # ── 杜比全景声(如果可用,覆盖 FLAC) ──
+    da = _as_stream_list(dolby.get("audio"))
+    if da:
+        url = _stream_url(max(da, key=stream_bandwidth))
+        if url:
+            audio_url, adesc = url, "杜比全景声(Dolby Atmos/E-AC-3)"
 
     return video_url, audio_url, vdesc, adesc
 
@@ -776,10 +869,45 @@ def _resolve_proxy_url(emit=None) -> tuple[str | None, str | None]:
     return raw_proxy, raw_proxy
 
 
-def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, log=None):
+def resolve_config_dir(player_path=None) -> Path:
+    """定位 mpv 的便携配置目录（portable_config）。
+
+    优先级（取第一个真实存在的目录）：
+      1. 播放器同级的 portable_config        —— 发行包 / 独立安装的 mpv 最准确的答案
+      2. <_exe_dir>/mpv-portable/portable_config —— 传统布局，保持向后兼容
+      3. <_exe_dir>/portable_config
+      4. 兜底返回传统布局表达式（即使不存在，行为与修改前一致）
+
+    背景：从源码运行时 _exe_dir 指向 legacy/，而 mpv-portable/ 实际位于仓库根目录，
+    旧实现会得到不存在的路径，导致 --config-dir 失效（HDR 映射等配置全部不生效）。
+    """
+    candidates = []
+    if player_path:
+        try:
+            candidates.append(Path(player_path).resolve().parent / "portable_config")
+        except OSError:
+            pass
+    candidates.append(_exe_dir / "mpv-portable" / "portable_config")
+    candidates.append(_exe_dir / "portable_config")
+
+    for cand in candidates:
+        try:
+            if cand.is_dir():
+                return cand
+        except OSError:
+            continue
+    return candidates[1]
+
+
+def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, log=None,
+                  segments=None, sponsor_cfg=None, danmaku_ass=None, subtitle_file=None):
     """唤起 mpv 播放。B 站（有 sessdata）走 CDN 直链 + cookie；YouTube（无 sessdata）走 ytdl_hook + 代理。
 
     log: 可选回调函数，用于把状态/错误信息传给 GUI（避免 print 在 --windowed 模式下被吞）。
+    segments: 可选，SponsorBlock 片段列表（已过滤）。非空时注入跳过脚本，自动跳过广告。
+    sponsor_cfg: 可选，SponsorBlock 配置字典（behavior/notify/debug/server 等）。
+    danmaku_ass: 可选，弹幕 ASS 路径（主字幕轨）。
+    subtitle_file: 可选，原生字幕 ASS 路径（次字幕轨，与弹幕并存）。
     """
     import tempfile
 
@@ -791,7 +919,8 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
                 pass
         print(msg, flush=True)
 
-    portable_conf = str(_exe_dir / "mpv-portable" / "portable_config")
+    portable_conf = str(resolve_config_dir(player_path))
+    launch_env = None  # 仅在注入 SponsorBlock 载荷时非 None
 
     # ── 公共参数 ──────────────────────────────────────────────────────────
     cmd = [
@@ -824,9 +953,91 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
                 "--demuxer-lavf-probescore=100",
             ]
 
+        # ── 弹幕与字幕：外挂 ASS ──────────────────────────────────────────
+        # 两条轨道的加载方式（已实测）：
+        #   mpv **没有** --secondary-sub-file 这个选项（本机 v0.41 实测不存在）。
+        #   正确做法是重复传 --sub-file 生成多个字幕轨（1、2…），
+        #   再用 --secondary-sid=N 指定第 N 轨为次要轨；主次两轨可同时显示。
+        # ASS 自带 PlayRes，mpv 会按其分辨率自动缩放。
+        dm_ok = bool(danmaku_ass) and os.path.isfile(str(danmaku_ass))
+        cc_ok = bool(subtitle_file) and os.path.isfile(str(subtitle_file))
+
+        if dm_ok and cc_ok:
+            # 弹幕 = 轨 1（主），原生字幕 = 轨 2（次）
+            # 关键：mpv 的 secondary-sub-ass-override 默认是 **strip**，
+            # 会把次轨的 ASS 样式（位置/字号/颜色）整段丢弃 —— 实测表现为字幕
+            # 变回默认小号白字并跑到画面顶部。必须显式设为 no 才能保留样式。
+            # （--sub-ass-override=no 只作用于主轨，管不到次轨。）
+            cmd += [
+                "--sub-file=" + str(danmaku_ass),
+                "--sub-file=" + str(subtitle_file),
+                "--sid=1",
+                "--secondary-sid=2",
+                "--sub-ass=yes",
+                "--sub-ass-override=no",
+                "--secondary-sub-ass-override=no",
+                "--sub-visibility=yes",
+                "--secondary-sub-visibility=yes",
+            ]
+            _emit(f"    [+] 弹幕已加载: {Path(danmaku_ass).name}（主轨）")
+            _emit(f"    [+] 字幕已加载: {Path(subtitle_file).name}（次轨）")
+        elif dm_ok:
+            cmd += ["--sub-file=" + str(danmaku_ass), "--sub-ass=yes",
+                    "--sub-ass-override=no", "--sub-visibility=yes"]
+            _emit(f"    [+] 弹幕已加载: {Path(danmaku_ass).name}")
+        elif cc_ok:
+            # 单独放字幕时走主轨；位置由 ASS 的 an/MarginV 决定
+            cmd += ["--sub-file=" + str(subtitle_file), "--sub-ass=yes",
+                    "--sub-ass-override=no", "--sub-visibility=yes"]
+            _emit(f"    [+] 字幕已加载: {Path(subtitle_file).name}")
+
+        # ── SponsorBlock：注入跳过脚本 + 彩色进度条 OSC ───────────────────
+        # 注意：--load-scripts=no 只禁用 scripts/ 目录自动加载，不影响显式 --script，
+        # 因此这里追加脚本不会拖慢启动，也不会与自动加载重复执行。
+        # 载荷走环境变量而非 --script-opts：后者以逗号分隔，会截断 JSON。
+        if segments:
+            try:
+                import sponsorblock as _sb
+
+                launch_env = dict(os.environ)
+                launch_env[_sb.PAYLOAD_ENV] = _sb.build_payload(
+                    sponsor_cfg.get("bvid", "") if sponsor_cfg else "",
+                    sponsor_cfg.get("cid", "") if sponsor_cfg else "",
+                    segments,
+                    sponsor_cfg or {},
+                    title=title,
+                )
+
+                # 1) 跳过脚本（执行 seek）
+                lua_path = _sb.ensure_lua_script(_CONFIG_DIR)
+                if lua_path.exists():
+                    cmd += ["--script=" + str(lua_path)]
+                else:
+                    _emit("    [!] SponsorBlock 跳过脚本写入失败")
+
+                # 2) 受管 OSC（彩色进度条 + 去广告时长）
+                #    必须配合 --osc=no：否则内置 OSC 与受管 OSC 会同时加载
+                #    （实测两者会各自渲染，脚本名变成 osc2，视觉上重叠）。
+                if sponsor_cfg and sponsor_cfg.get("managed_osc", True):
+                    import mpv_osc as _osc
+
+                    osc_path, osc_status = _osc.ensure_managed_osc(_CONFIG_DIR, log=_emit)
+                    if osc_path:
+                        cmd += ["--osc=no", "--script=" + str(osc_path)]
+                    else:
+                        # 打补丁失败 -> 保留 mpv 内置 OSC，功能降级但不影响播放
+                        _emit("    [*] 彩色进度条不可用，使用 mpv 内置 OSC")
+
+                _emit(f"    [+] 广告跳过: 已注入 {len(segments)} 个片段")
+            except Exception as e:
+                _emit(f"    [!] SponsorBlock 注入失败（已忽略）: {e}")
+
     # ── YouTube：ytdl_hook 解析 + 走系统代理 ──────────────────────────────
     else:
-        ytdlp_exe = str(_exe_dir / "mpv-portable" / "yt-dlp.exe")
+        # yt-dlp 与 mpv 同目录（发行包布局），回退到传统 mpv-portable/ 布局
+        ytdlp_exe = str(Path(player_path).resolve().parent / "yt-dlp.exe")
+        if not os.path.isfile(ytdlp_exe):
+            ytdlp_exe = str(_exe_dir / "mpv-portable" / "yt-dlp.exe")
         if not os.path.isfile(ytdlp_exe):
             _emit(f"    [!] 未找到 yt-dlp.exe: {ytdlp_exe}")
             _emit(f"        请从 https://github.com/yt-dlp/yt-dlp/releases 下载 yt-dlp.exe")
@@ -856,6 +1067,9 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
     popen_kw = {}
     if sys.platform == "win32":
         popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+    if launch_env is not None:
+        # SponsorBlock 载荷经环境变量传给 mpv 的 Lua 脚本
+        popen_kw["env"] = launch_env
     proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, **popen_kw)
 
     # cookie 文件由 atexit 自动清理，无需阻塞等待
