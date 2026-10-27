@@ -18,6 +18,10 @@ _hidden_imports = [
     "tkinter.filedialog",
     # pyperclip 平台后端
     "pyperclip",
+    # 扫码登录的二维码生成（pyw 函数内 import，显式声明防漏打包——
+    # 漏打包的表现：扫码线程静默异常 + wait_window 永久假死，用户只能
+    # 任务管理器杀进程。2026-10-27 成品化审查 B-3 记录）
+    "qrcode",
     # requests 底层依赖
     "urllib3",
     "charset_normalizer",
