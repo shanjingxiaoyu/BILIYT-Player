@@ -14,9 +14,17 @@ local CLICK_DELAY = 0.3   -- 单击判定窗口（秒）：大于此间隔的连
 local HOLD_DELAY  = 0.3   -- 右键长按判定阈值（秒）
                           -- 必须 > mpv 键盘自动重复延迟 input-ar-delay（默认 0.2s），
                           -- 保证长按必然先产生 repeat 事件
+local DBL_SUPPRESS = 0.15 -- 双击余波压制窗口（秒）：真实双击的事件序列是
+                          -- press1 → dbl → press2（SDL 把第二次点击转成 clicks=2
+                          -- 的 down/up，mpv 先派发 DBL、后由 up 合成 press）。
+                          -- press2 距 dbl 亚毫秒级，150ms 绰绰有余；人类不可能在
+                          -- 150ms 内完成「双击后再单击」，不会误伤真实单击。
+                          -- 2026-10-27 用户实测 bug：原无此压制，press2 起新定时器，
+                          -- 300ms 后误暂停（双击全屏后播放器自己暂停）。
 
 -- ── 左键：单击暂停 / 双击全屏（防抖） ────────────────────────────────────────
 local click_timer = nil
+local last_dbl_at = -1   -- 最近一次双击的 mpv 时间戳（秒），用于压制双击余波
 
 local function kill_click_timer()
     if click_timer then
@@ -26,6 +34,8 @@ local function kill_click_timer()
 end
 
 mp.add_key_binding("MBTN_LEFT", "click-pause", function()
+    -- 双击序列的 press2 是双击余波（距 dbl 亚毫秒），不能起暂停定时器
+    if mp.get_time() - last_dbl_at < DBL_SUPPRESS then return end
     kill_click_timer()
     click_timer = mp.add_timeout(CLICK_DELAY, function()
         mp.command("cycle pause")
@@ -35,6 +45,7 @@ end)
 
 mp.add_key_binding("MBTN_LEFT_DBL", "dblclick-fullscreen", function()
     kill_click_timer()  -- 双击：取消本次单击的暂停，直接全屏
+    last_dbl_at = mp.get_time()
     mp.command("cycle fullscreen")
 end)
 

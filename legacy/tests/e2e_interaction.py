@@ -92,18 +92,29 @@ print("\n== T3 → 短按 = 快进 5s（暂停态消除自然播放噪声）==",
 # 测试陷阱：lavfi 测试源的 seek N 实际跳 2N（demuxer 怪癖，与交互无关），
 # 「不双触发」的严格检测必须传真实视频；lavfi 模式下退化为「seek 生效」。
 IS_LAVFI = "lavfi" in VIDEO
-pipe_cmd("set_property", "pause", "yes"); time.sleep(0.5)
-t0 = prop("playback-time"); key("RIGHT", "keydown"); time.sleep(0.08); key("RIGHT", "keyup")
-time.sleep(0.6); t1 = prop("playback-time")
-pipe_cmd("set_property", "pause", "no")
-delta = (t1 or 0) - (t0 or 0)
+def probe_seek():
+    pipe_cmd("set_property", "pause", "yes"); time.sleep(0.4)
+    t0 = prop("playback-time"); key("RIGHT", "keydown"); time.sleep(0.08); key("RIGHT", "keyup")
+    time.sleep(0.6); t1 = prop("playback-time")
+    pipe_cmd("set_property", "pause", "no")
+    return (t1 or 0) - (t0 or 0)
+
 if IS_LAVFI:
+    delta = probe_seek()
     check("短按seek生效", delta >= 3.0, f"lavfi态 Δ{delta:.3f}s（严格检测请传真实视频）")
 else:
+    delta = probe_seek()
+    if delta < 0:
+        # time 倒退 = 起播期 rebuffer 抖动（高码率大文件），重测一次
+        time.sleep(2.0)
+        delta2 = probe_seek()
+        print(f"  （T3 首次 Δ{delta:.3f}s 疑 rebuffer，重测 Δ{delta2:.3f}s）", flush=True)
+        delta = delta2 if delta2 >= 0 else delta
     check("短按快进=5s且不双触发", 3.0 <= delta <= 7.0, f"暂停态 Δ{delta:.3f}s（双触发会≈10s）")
 
 print("\n== T4 → 长按 = 2.0x，松开恢复 ==", flush=True)
-s0 = prop("speed"); key("RIGHT", "keydown"); time.sleep(0.6)
+time.sleep(0.3)  # 等 T3 的 pause=no 切换落定，防 IPC 时序抖动
+s0 = prop("speed"); key("RIGHT", "keydown"); time.sleep(0.8)
 s_mid = prop("speed"); key("RIGHT", "keyup"); time.sleep(0.8)
 s1 = prop("speed")
 check("长按加速到2.0x", s_mid == 2.0, f"speed {s0} -> {s_mid}")
@@ -122,6 +133,23 @@ check("双击全屏", f0 is False and f1 is True, f"fullscreen {f0} -> {f1}")
 key("MBTN_LEFT_DBL", "keypress"); time.sleep(1.0)
 f2 = prop("fullscreen")
 check("再双击退出", f2 is False, f"fullscreen {f1} -> {f2}")
+
+print("\n== T7 真实双击序列（press1→dbl→press2，2026-10-27 用户实测bug回归）==", flush=True)
+# 真实鼠标双击：SDL 把第二次点击转为 clicks=2 的 down/up，mpv 先派发 DBL、
+# 后由 up 合成 press。若 press2 又起暂停定时器，300ms 后会误暂停（用户报告的现象）。
+# 修复：lua 用 150ms 压制窗口（DBL_SUPPRESS）。注意 IPC 模拟的 dbl→press2 间隔会被
+# 派发延迟拉到 ~70ms（实测 diff=0.069），阈值必须 > 此值；真实鼠标是亚毫秒级。
+f0 = prop("fullscreen"); p0 = prop("pause")
+key("MBTN_LEFT", "keypress"); time.sleep(0.1)      # press1
+key("MBTN_LEFT_DBL", "keypress"); time.sleep(0.02)  # dbl
+key("MBTN_LEFT", "keypress")                        # press2（双击余波）
+time.sleep(0.8)                                      # 等过 300ms 防抖窗口
+f1 = prop("fullscreen"); p1 = prop("pause")
+check("真实双击只全屏不暂停", f1 is not f0 and p1 is p0,
+      f"fullscreen {f0} -> {f1}（应切换）；pause {p0} -> {p1}（应不变）")
+key("MBTN_LEFT_DBL", "keypress"); time.sleep(1.0)   # 还原窗口状态
+f2 = prop("fullscreen")
+check("T7后状态还原", f2 is f0, f"fullscreen {f1} -> {f2}")
 
 try: pipe_cmd("quit")
 except Exception: pass
