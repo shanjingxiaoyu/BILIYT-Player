@@ -17,7 +17,7 @@ import queue
 import threading
 import tkinter as tk
 from collections import deque
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 from datetime import datetime
 import subprocess as sp
@@ -102,11 +102,23 @@ class App:
         self._build_ui()
 
         if not self.sessdata:
-            # 无 SESSDATA → 弹窗扫码登录（阻塞主线程直到完成/取消）
-            self.sessdata = self._qr_login_window()
-            if not self.sessdata:
-                self.root.destroy()
-                sys.exit(0)
+            # 无 SESSDATA → 弹窗扫码登录（阻塞主线程直到完成/取消/失败）
+            # B-2（2026-10-27 修）：失败/取消都不再静默退出——说明原因 + 给重试。
+            # 原来这里拿到 None 就直接 sys.exit(0)，用户看到的是"程序一闪就没"。
+            self.sessdata, login_err = self._qr_login_window()
+            while not self.sessdata:
+                if login_err:
+                    retry = messagebox.askretrycancel(
+                        "B 站登录失败",
+                        f"{login_err}\n\n（常见原因：网络不通、B 站接口暂时不可用）\n\n是否重试？")
+                else:
+                    retry = messagebox.askretrycancel(
+                        "未登录",
+                        "你取消了扫码登录。\n未登录时 B 站链接无法播放。\n\n是否重新扫码？")
+                if not retry:
+                    self.root.destroy()
+                    sys.exit(0)
+                self.sessdata, login_err = self._qr_login_window()
 
         # 后台线程做 SESSDATA 校验+初始化,避免网络阻塞 GUI
         self._show_status_page()
@@ -188,9 +200,11 @@ class App:
         """
         from bili_clipboard_dolby import init_bili_session
         self._log("[*] 正在打开扫码登录…")
-        sd = self._qr_login_window()
+        sd, err = self._qr_login_window()
         if not sd:
-            self._log("[*] 已取消重新登录，当前登录态保持不变。")
+            # B-2（2026-10-27 修）：区分"取消"与"失败"，失败要把原因说出来
+            self._log(f"[!] 重新登录失败：{err}" if err
+                      else "[*] 已取消重新登录，当前登录态保持不变。")
             return
         self._log("[*] 扫码成功，正在验证新登录态…")
 
@@ -220,12 +234,28 @@ class App:
         threading.Thread(target=do_init, daemon=True).start()
 
     # ---------- SESSDATA 扫码登录 ----------
-    def _qr_login_window(self) -> str | None:
-        """弹窗显示 B 站登录二维码，后台线程轮询扫码。返回 SESSDATA 或 None。"""
+    def _qr_login_window(self) -> tuple[str | None, str | None]:
+        """弹窗显示 B 站登录二维码，后台线程轮询扫码。
+
+        返回 (sessdata, error_msg)：
+        - 成功:  (SESSDATA, None)
+        - 取消:  (None, None)     —— 用户主动点取消/关窗
+        - 失败:  (None, 原因)     —— 二维码申请失败/失效/超时等
+
+        线程分工（B-3，2026-10-27 修）：run 线程只往 ui_q 投递纯 Python 数据，
+        所有 tkinter 操作由主线程的 drain 代劳——子线程直接调 after 在
+        wait_window 期间必抛 "main thread is not in main loop"，
+        会让二维码画不出、关窗丢失、wait_window 永久假死。
+        B-2：进度与失败消息同时进主窗口日志与二维码窗自己的状态栏，
+        不再只写进被模态窗遮挡的主窗口日志。
+        """
         from bili_clipboard_dolby import qr_login_sessdata
 
-        result = {"sessdata": None}
+        result = {"sessdata": None, "error": None, "last_err": None}
         cancel_evt = threading.Event()
+        # 子线程 → 主线程的唯一通道：("draw"|"status"|"done", payload)
+        ui_q: queue.Queue = queue.Queue()
+        cancel_at = {"t": None}
 
         win = tk.Toplevel(self.root)
         win.title("B 站扫码登录")
@@ -233,7 +263,6 @@ class App:
         win.resizable(False, False)
         win.transient(self.root)
         win.grab_set()
-        win.protocol("WM_DELETE_WINDOW", lambda: cancel_evt.set())
 
         canvas = tk.Canvas(win, width=290, height=290, bg="white", highlightthickness=0)
         canvas.pack(pady=(20, 8))
@@ -244,24 +273,78 @@ class App:
             win, text="使用 B 站 App「扫一扫」，在手机上确认登录",
             foreground="#888", font=("Microsoft YaHei", 9),
         ).pack(pady=(0, 14))
-        ttk.Button(win, text="取消", command=lambda: cancel_evt.set()).pack(pady=(0, 16))
 
+        def on_cancel():
+            cancel_evt.set()
+            # 记下取消时刻：线程可能正卡在网络请求里（最长 10s 超时 + 2s 轮询），
+            # 不能干等它自然醒，超时后由 drain 强制收尾（B-3：绝不假死）。
+            if cancel_at["t"] is None:
+                cancel_at["t"] = time.time()
+        win.protocol("WM_DELETE_WINDOW", on_cancel)
+        ttk.Button(win, text="取消", command=on_cancel).pack(pady=(0, 16))
+
+        # ---- 子线程侧：只碰纯 Python 对象，绝不碰 tkinter ----
         def draw(matrix):
-            self.root.after(0, lambda: self._draw_qr_canvas(canvas, matrix))
+            ui_q.put(("draw", matrix))
 
-        def on_status(msg):
-            self.root.after(0, lambda: status_lbl.configure(text=msg))
+        def on_any(msg):
+            text = str(msg)
+            # B-2：留住最后一条错误，供弹窗说清原因（后端失败时只 return None，
+            # 具体原因原本只进日志，而日志正被这个模态窗挡着，等于没说）
+            if text.startswith("[!]"):
+                result["last_err"] = text
+            ui_q.put(("status", text))
 
         def run():
-            sd = qr_login_sessdata(
-                emit=self._log, draw_qr=draw, on_status=on_status, cancel=cancel_evt,
-            )
-            result["sessdata"] = sd
-            self.root.after(0, win.destroy)
+            try:
+                result["sessdata"] = qr_login_sessdata(
+                    emit=on_any, draw_qr=draw, cancel=cancel_evt,
+                )
+            except Exception as e:
+                result["error"] = f"扫码过程异常: {e}"
+            finally:
+                if not result["sessdata"] and not cancel_evt.is_set() \
+                        and not result["error"]:
+                    result["error"] = result.get("last_err") or "登录未完成"
+                ui_q.put(("done", None))  # B-3：任何出口都通知主线程收尾
+
+        # ---- 主线程侧：唯一接触 tkinter 的地方 ----
+        # 为什么必须绕这一圈（2026-10-27 实测定论）：
+        # _tkinter 的 C 层要求"主线程正处在 main loop 中"才允许注册回调，
+        # 而 wait_window 用的是 Tcl 层的 tkwait 命令，C 层 dispatching 标志仍是 0。
+        # 于是子线程调 after 会先卡 1 秒再抛
+        # "RuntimeError: main thread is not in main loop"。
+        # 危害链：二维码画不出（空白框）→ 状态栏卡在"正在获取二维码…" →
+        # finally 的关窗 after 同样丢失 → wait_window 永久假死。
+        # 该窗口期只存在于冷启动（mainloop 尚未起来），热路径「重新登录」
+        # 恰好在 mainloop 内所以一直没暴露。
+        def drain():
+            done = False
+            while True:
+                try:
+                    kind, payload = ui_q.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "draw":
+                    self._draw_qr_canvas(canvas, payload)
+                    status_lbl.configure(text="请用 B 站 App 扫码")
+                elif kind == "status":
+                    self._log_ui(payload)
+                    status_lbl.configure(text=payload[:72])
+                elif kind == "done":
+                    done = True
+            if done:
+                win.destroy()
+                return
+            if cancel_at["t"] is not None and time.time() - cancel_at["t"] > 1.5:
+                win.destroy()  # 用户已点取消，线程迟迟不醒就强行收场
+                return
+            win.after(50, drain)
 
         threading.Thread(target=run, daemon=True).start()
-        self.root.wait_window(win)  # 主线程局部事件循环，阻塞至扫码完成/取消
-        return result["sessdata"]
+        win.after(50, drain)
+        self.root.wait_window(win)  # 主线程局部事件循环，阻塞至扫码完成/取消/失败
+        return result["sessdata"], result["error"]
 
     @staticmethod
     def _draw_qr_canvas(canvas, matrix):
@@ -332,14 +415,14 @@ class App:
             holder = {}
 
             def do_login():
-                holder["sd"] = self._qr_login_window()
+                holder["sd"], holder["err"] = self._qr_login_window()
                 done.set()
 
             self.root.after(0, do_login)
             done.wait(timeout=240)  # 最多等 4 分钟（二维码有效期 + 轮询超时）
             self.sessdata = holder.get("sd")
             if not self.sessdata:
-                self._log("[!] 扫码登录未完成。")
+                self._log(f"[!] 扫码登录未完成: {holder.get('err') or '用户取消'}")
                 self.root.after(0, self._quit)
                 return
             try:
