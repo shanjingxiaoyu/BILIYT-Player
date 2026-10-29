@@ -1143,26 +1143,123 @@ def start_ipc_monitor():
 _MPV_PROC = None
 
 
-def _quit_previous_mpv(timeout: float = 2.0):
-    """新播放前清退旧 mpv。
+def _pid_exe_path(pid: int) -> str:
+    """取进程的可执行文件完整路径（取不到返回 ""）。"""
+    import ctypes
+    from ctypes import wintypes
+    if sys.platform != "win32":
+        return ""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    k32 = ctypes.windll.kernel32
+    # 64 位下句柄会被截断成 32 位 int → 必须显式声明 restype/argtypes
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return ""
+    try:
+        k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        k32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.c_wchar_p,
+            ctypes.POINTER(wintypes.DWORD)]
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(1024)
+        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return buf.value
+        return ""
+    finally:
+        ctypes.windll.kernel32.CloseHandle(h)
 
-    优先走 IPC 管道发 quit（优雅退出：正常释放命名管道 + WASAPI 独占音频设备），
-    覆盖两种旧实例：本会话启动的、以及上次应用退出留下的孤儿（孤儿仍占管道，
-    能收到 quit）。确认管道释放后才返回；跟踪到的进程超时未死则强杀兜底。
+
+def _our_mpv_pids() -> list[int]:
+    """枚举 mpv.exe，只返回「本软件播放器路径」的那些 PID。
+
+    强杀卡死残留时的安全绳：用户自己单独装的独立 mpv（路径不同）不受牵连，
+    避免"我只是用本软件播个视频，结果我另一个窗口里的 mpv 被杀了"。
+    """
+    if sys.platform != "win32":
+        return []
+    try:
+        player = find_player()
+    except Exception:
+        return []
+    if not player:
+        return []
+    want = str(Path(player).resolve()).lower()
+    try:
+        out = _run_silent(["tasklist", "/FI", "IMAGENAME eq mpv.exe",
+                           "/FO", "CSV", "/NH"],
+                          capture_output=True, text=True, timeout=5)
+    except Exception:
+        return []
+    pids = []
+    for line in (out.stdout or "").splitlines():
+        parts = [p.strip().strip('"') for p in line.split('","')]
+        if len(parts) < 2 or not parts[1].isdigit():
+            continue
+        pid = int(parts[1])
+        if _pid_exe_path(pid).lower() == want:
+            pids.append(pid)
+    return pids
+
+
+def _wait_pipe_gone(timeout: float) -> bool:
+    """等命名管道消失（旧 mpv 退出后管道自动释放）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        h = _pipe_open(timeout_ms=100)
+        if not h:
+            return True
+        _pipe_close(h)
+        time.sleep(0.15)
+    return False
+
+
+def _wait_pipe_ready(timeout: float) -> bool:
+    """等新 mpv 的命名管道建立起来。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        h = _pipe_open(timeout_ms=200)
+        if h:
+            _pipe_close(h)
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _quit_previous_mpv(timeout: float = 4.0) -> bool:
+    """新播放前清退旧 mpv（含上次应用退出留下的孤儿）。
+
+    三步：IPC quit（优雅，会释放 WASAPI 独占音频设备）→ 等管道释放 →
+    仍被占则强杀（卡死的 mpv 不响应 quit，如 GPU 挂起/死等网络流）。
+
+    返回：管道是否已释放。False 意味着新 mpv 拿不到管道，切集/连播/
+    鼠标交互会静默失效——调用方必须据此告知用户，而不是无声继续。
     """
     global _MPV_PROC
+    released = True
     # 管道被占 = 有旧 mpv（含孤儿）在运行
     probe = _pipe_open(timeout_ms=200)
     if probe:
         _pipe_close(probe)
         _ipc_send_cmd(["quit"])
+        released = False
         deadline = time.time() + timeout
         while time.time() < deadline:
             h = _pipe_open(timeout_ms=100)
             if not h:
-                break  # 管道已释放，旧 mpv 已退出
+                released = True  # 管道已释放，旧 mpv 已退出
+                break
             _pipe_close(h)
-            time.sleep(0.1)
+            time.sleep(0.15)
+        if not released:
+            for pid in _our_mpv_pids():
+                try:
+                    _run_silent(["taskkill", "/F", "/PID", str(pid)],
+                                capture_output=True, timeout=5)
+                except Exception:
+                    pass
+            released = _wait_pipe_gone(2.0)
     # 跟踪到的进程仍存活 → 强杀兜底
     proc = _MPV_PROC
     if proc is not None and proc.poll() is None:
@@ -1174,7 +1271,9 @@ def _quit_previous_mpv(timeout: float = 2.0):
                 proc.kill()
             except Exception:
                 pass
+        released = _wait_pipe_gone(1.0) or released
     _MPV_PROC = None
+    return released
 
 
 def _pause_browser_media():
@@ -1455,7 +1554,12 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
 
     _emit(f"    唤起 mpv: {title}")
     # 先清退旧 mpv（双开会抢 IPC 管道导致切集/连播失效，且双窗口混播）
-    _quit_previous_mpv()
+    # B-4（2026-10-30）：接管清理结果。清不干净时新 mpv 拿不到 IPC 管道，
+    # 画面照常播放但切集/连播/鼠标交互全部失效——这种"看着正常其实残废"
+    # 的状态最坑人，必须让调用方知道，好提示用户。
+    cleaned = _quit_previous_mpv()
+    if not cleaned:
+        _emit(f"    [!] 上一个 mpv 没能清退，{IPC_PIPE} 仍被占用")
     # 先发媒体暂停键让浏览器视频暂停,再启动 mpv(避免 mpv 也收到暂停)
     _pause_browser_media()
     time.sleep(0.2)
@@ -1481,4 +1585,11 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
         if err:
             _emit(f"    [!] {err.strip()}")
     elif code is None:
-        _emit(f"    [+] mpv 正在播放: {title}")
+        # B-4（2026-10-30）：必须确认 IPC 管道真的建立，不能只看进程活着。
+        # 管道没建立时画面照播，但切集/连播/鼠标交互全废，用户毫无察觉。
+        if _wait_pipe_ready(4.0):
+            _emit(f"    [+] mpv 正在播放: {title}")
+        else:
+            _emit(f"    [!] mpv 已启动，但 {IPC_PIPE} 没能建立")
+            _emit("        → 切集(Ctrl+←/→)、自动连播、鼠标交互会失效")
+            _emit("        → 通常是残留 mpv 占着同名管道，关掉它再复制一次链接即可")
