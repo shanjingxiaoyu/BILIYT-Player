@@ -35,8 +35,8 @@ config/input.conf       mpv 快捷键配置（参考副本）
 # 2. 安装依赖
 pip install -r requirements.txt
 
-# 3. 配置 B 站 SESSDATA（可选，未配置则游客权限）
-#    在 legacy/.env 中设置：SESSDATA=你的凭证
+# 3. B 站登录：首次启动会弹出二维码，用 B 站 App 扫码即可
+#    凭证自动保存到 %APPDATA%/BiliYTPlayer/.env，无需手工填写
 
 # 4. 运行
 pythonw legacy/bili_yt_player.pyw
@@ -46,9 +46,12 @@ pythonw legacy/bili_yt_player.pyw
 
 ```bash
 cd legacy
-.venv/Scripts/python.exe -m PyInstaller --noconfirm bili_yt_player.spec
+.venv-tk/Scripts/python.exe -m PyInstaller --noconfirm bili_yt_player.spec
 # 输出 dist/BiliYTPlayer.exe，与 mpv-portable/ 同级放置
 ```
+
+> `.venv-tk` 必须基于**系统版 Python** 创建（自带 tkinter）。用托管版 Python
+> 建的虚拟环境没有 tkinter，打包不报错但 exe 双击即崩。
 
 ## 关键设计
 
@@ -63,7 +66,7 @@ cd legacy
 
 ## 敏感信息声明
 
-仓库不含任何账号凭证。B 站 SESSDATA 通过本地 `.env` 文件提供（已在 .gitignore 中排除），请勿提交。
+仓库不含任何账号凭证。B 站登录态由扫码登录自动保存到用户目录 `%APPDATA%/BiliYTPlayer/.env`，不随仓库分发，请勿分享该文件。播放时凭证通过 HTTP 请求头直接传给 mpv，不写入临时文件。
 
 ## 环境要求
 
