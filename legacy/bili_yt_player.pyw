@@ -22,6 +22,7 @@ from pathlib import Path
 from datetime import datetime
 import subprocess as sp
 from dotenv import load_dotenv
+import app_log  # 本地开发日志：源码运行写盘，打包 exe 自动静默
 
 # ---- subprocess helpers: hide console window on Windows (no flashing cmd) ----
 def _popen_silent(*args, **kwargs):
@@ -166,6 +167,9 @@ class App:
 
     def _log(self, msg):
         """线程安全：所有调用方都可能来自后台线程，统一通过 root.after 调度到主线程。"""
+        # 落盘放在 UI 调度之前：窗口都已销毁时 after 会失败，但日志仍要留下。
+        # app_log 在打包 exe 下自动 no-op，发布版不产生任何日志文件。
+        app_log.log(str(msg))
         try:
             self.root.after(0, self._log_ui, msg)
         except Exception:
@@ -367,7 +371,17 @@ class App:
     # ---------- 后端初始化 ----------
     def _show_status_page(self):
         self._log("正在初始化…")
-        threading.Thread(target=self._init_backend, daemon=True).start()
+
+        def run():
+            # 后台初始化线程一旦抛非预期异常，原来会静默死掉 →
+            # 监听不启动、复制链接毫无反应，且看不到任何原因。落盘兜住它。
+            try:
+                self._init_backend()
+            except Exception:
+                app_log.exception("后台初始化线程异常（剪贴板监听可能未启动）")
+                self._log("[!] 初始化失败，详见本地开发日志")
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _init_backend(self):
         from bili_clipboard_dolby import find_player
@@ -456,6 +470,7 @@ class App:
         if self.running:
             return
         self.running = True
+        app_log.log("[+] 剪贴板监听已启动（初始化完成）")
         # 监听线程：轻量，只读剪贴板 + 正则匹配 → 入队
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
@@ -526,6 +541,9 @@ class App:
                 self._log(f">> 媒体详情 MD: {raw_id}")
                 self._play_bili_id("md", int(raw_id))
         except Exception as e:
+            # 起播链路失败时，GUI 原来只显示一句 str(e)，看不到是哪一步炸的。
+            # 落盘带上完整 traceback（发布版 no-op）。
+            app_log.exception(f"处理任务失败 type={_type} raw_id={raw_id} extra={extra}")
             self._log(f"  [!] {e}")
 
     # ---------- 播放 ----------
@@ -687,6 +705,9 @@ _INSTANCE_MUTEX = None
 
 
 if __name__ == "__main__":
+    app_log.log("=" * 64)
+    app_log.log(f"=== 启动 frozen={getattr(sys, 'frozen', False)} "
+                f"python={sys.version.split()[0]} ===")
     _ensure_single_instance()
     try:
         App()
