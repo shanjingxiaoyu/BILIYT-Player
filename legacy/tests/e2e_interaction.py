@@ -12,6 +12,10 @@
 #   T4    → 长按 = 2.0x 倍速，松开恢复
 #   T5    SPACE 快捷键回归（input.conf 默认行为不受影响）
 #   T6    左键双击 = 全屏/退出
+#   T7    真实双击序列 press1→dbl→press2 = 只全屏不误暂停
+#   T8    慢双击/高负载余波（dbl→press2 间隔 250ms / 400ms）不误暂停
+#         2026-11-09 偶发误暂停回归：旧版固定 150ms 窗口挡不住迟到的 press2
+#   T9    双击后单击仍能暂停（事件驱动状态机不能误吞后续单击）
 #
 # 实现说明：
 #   - 纯 IPC 驱动：mpv 的 keydown/keyup/keypress IPC 命令直接派发输入事件，
@@ -150,6 +154,37 @@ check("真实双击只全屏不暂停", f1 is not f0 and p1 is p0,
 key("MBTN_LEFT_DBL", "keypress"); time.sleep(1.0)   # 还原窗口状态
 f2 = prop("fullscreen")
 check("T7后状态还原", f2 is f0, f"fullscreen {f1} -> {f2}")
+
+print("\n== T8 慢双击 / 高负载余波（2026-11-09 偶发误暂停回归）==", flush=True)
+# 旧版 150ms 固定压制窗口：dbl→press2 间隔超过 150ms 就漏网，press2 起
+# 300ms 定时器 →「放大了但过一会儿也暂停了」。IPC 实测 250ms 稳定复现。
+# 修法：事件驱动，双击后吞掉第一个 press，与它晚到多久无关。
+for label, delay in [("250ms", 0.25), ("400ms", 0.40)]:
+    pipe_cmd("set_property", "pause", False)
+    pipe_cmd("set_property", "fullscreen", False)
+    time.sleep(0.3)                       # 让上一轮 guard 过期 + 复位生效
+    fa, pa = prop("fullscreen"), prop("pause")
+    key("MBTN_LEFT", "keypress"); time.sleep(0.1)       # press1
+    key("MBTN_LEFT_DBL", "keypress"); time.sleep(delay)  # dbl
+    key("MBTN_LEFT", "keypress")                         # 迟到的 press2
+    time.sleep(0.8)                                      # 等过 300ms 防抖
+    fb, pb = prop("fullscreen"), prop("pause")
+    check(f"慢双击{label}只全屏不暂停", fb is not fa and pb is pa,
+          f"fullscreen {fa}->{fb}（应切换）；pause {pa}->{pb}（应不变）")
+
+print("\n== T9 双击后单击仍能暂停（不能误吞后续单击）==", flush=True)
+pipe_cmd("set_property", "pause", False)
+pipe_cmd("set_property", "fullscreen", False)
+time.sleep(0.7)
+p0 = prop("pause")
+key("MBTN_LEFT", "keypress"); time.sleep(0.1)      # press1
+key("MBTN_LEFT_DBL", "keypress"); time.sleep(0.05)  # dbl
+key("MBTN_LEFT", "keypress")                        # press2（被吞）
+time.sleep(0.35)                                    # 等余波过去
+key("MBTN_LEFT", "keypress")                        # 用户真的单击
+time.sleep(0.7)
+p1 = prop("pause")
+check("双击后单击仍可暂停", p1 is not p0, f"pause {p0} -> {p1}（应切换）")
 
 try: pipe_cmd("quit")
 except Exception: pass
