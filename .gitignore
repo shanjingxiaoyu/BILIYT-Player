@@ -50,3 +50,7 @@ Desktop.ini
 .idea/
 .vscode/
 *.swp
+
+# ── 发布产物（二进制包由 Releases 单独分发，不进源码仓库）───────────────────
+BiliYTPlayer-v*-win64/
+BiliYTPlayer-v*-win64.zip
