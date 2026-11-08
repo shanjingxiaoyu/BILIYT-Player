@@ -17,7 +17,6 @@ import sys
 import re
 import time
 import json
-import atexit
 import socket
 import hashlib
 import threading
@@ -1470,12 +1469,32 @@ def _yt_is_throttled(ytdlp_exe: str, page_url: str, proxy: str,
         return False
 
 
+def _cleanup_stale_cookie_files():
+    """自愈：清掉旧版本 atexit 没删干净的明文 cookie 文件。
+
+    只删 30 秒前的，避免误删同机旧版实例刚写、还在用的文件。
+    新链路完全不产生 cookie 文件，这个函数迟早可以拿掉。
+    """
+    import glob
+    import tempfile
+    try:
+        d = tempfile.gettempdir()
+        for p in glob.glob(os.path.join(d, "bili_cookies_*.txt")):
+            try:
+                if time.time() - os.path.getmtime(p) > 30:
+                    os.unlink(p)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, log=None):
-    """唤起 mpv 播放。B 站（有 sessdata）走 CDN 直链 + cookie；YouTube（无 sessdata）走 ytdl_hook + 代理。
+    """唤起 mpv 播放。B 站（有 sessdata）走 CDN 直链 + 鉴权头；YouTube（无 sessdata）走 ytdl_hook + 代理。
 
     log: 可选回调函数，用于把状态/错误信息传给 GUI（避免 print 在 --windowed 模式下被吞）。
     """
-    import tempfile
+    _cleanup_stale_cookie_files()
 
     def _emit(msg):
         if log:
@@ -1503,18 +1522,15 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
     if os.path.isfile(lua_script):
         cmd += [f"--script={lua_script}"]
 
-    # ── B 站：CDN 直链 + cookie + DASH 音视频分离 ──────────────────────────
+    # ── B 站：CDN 直链 + 鉴权头 + DASH 音视频分离 ──────────────────────────
+    # 2026-11-09 修（明文凭证残留）：原先把 SESSDATA 写进 %TEMP% 的
+    # Netscape cookie 文件再交给 --cookies-file，清理却挂在 atexit 上——
+    # 强杀/崩溃/连续起播都会在盘上留下明文登录态。
+    # 改为把 Cookie 直接并进 --http-header-fields（与 Referer 一起），全程不落盘。
+    # SESSDATA 是 URL 编码的（逗号为 %2C），不会破坏 mpv 按逗号切分头部。
     if sessdata:
-        cookie_fd, cookie_path = tempfile.mkstemp(
-            suffix=".txt", prefix="bili_cookies_", text=True
-        )
-        with os.fdopen(cookie_fd, "w", encoding="utf-8") as f:
-            f.write("# Netscape HTTP Cookie File\n")
-            f.write(".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\t" + sessdata + "\n")
-        atexit.register(lambda p=cookie_path: os.unlink(p) if os.path.exists(p) else None)
         cmd += [
-            "--cookies-file=" + cookie_path,
-            "--http-header-fields=Referer: " + REFERER,
+            "--http-header-fields=Referer: " + REFERER + ",Cookie: SESSDATA=" + sessdata,
             "--user-agent=" + UA,
         ]
         if audio_url:
@@ -1574,7 +1590,7 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
     # 启动 IPC 监听线程：支持 < / > 切集 + 播完自动下一集（幂等）
     start_ipc_monitor()
 
-    # cookie 文件由 atexit 自动清理，无需阻塞等待
+    # 鉴权信息随 HTTP 头直传，无临时文件需要清理
 
     # 快速检查 mpv 是否秒退
     time.sleep(0.3)

@@ -23,6 +23,7 @@ from datetime import datetime
 import subprocess as sp
 from dotenv import load_dotenv
 import app_log  # 本地开发日志：源码运行写盘，打包 exe 自动静默
+import version  # VERSION / WINDOW_TITLE 的唯一来源
 
 # ---- subprocess helpers: hide console window on Windows (no flashing cmd) ----
 def _popen_silent(*args, **kwargs):
@@ -82,7 +83,7 @@ P_PARAM_RE = re.compile(r"[?&]p=(\d+)")  # 分 P 参数
 class App:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("剪贴板直连播放器 — B站 / YouTube")
+        self.root.title(version.WINDOW_TITLE)
         self.root.geometry("480x420")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
@@ -130,7 +131,7 @@ class App:
         self.main_frame.pack(fill="both", expand=True)
 
         ttk.Label(
-            self.main_frame, text="剪贴板直连播放器 — B站 / YouTube",
+            self.main_frame, text=version.WINDOW_TITLE,
             font=("Microsoft YaHei", 12, "bold"),
         ).pack(pady=(0, 10))
 
@@ -692,7 +693,7 @@ def _ensure_single_instance():
     if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
         try:
             user32 = ctypes.windll.user32
-            hwnd = user32.FindWindowW(None, "剪贴板直连播放器 — B站 / YouTube")
+            hwnd = user32.FindWindowW(None, version.WINDOW_TITLE)
             if hwnd:
                 user32.ShowWindow(hwnd, 9)  # SW_RESTORE
                 user32.SetForegroundWindow(hwnd)
@@ -706,7 +707,7 @@ _INSTANCE_MUTEX = None
 
 if __name__ == "__main__":
     app_log.log("=" * 64)
-    app_log.log(f"=== 启动 frozen={getattr(sys, 'frozen', False)} "
+    app_log.log(f"=== 启动 v{version.VERSION} frozen={getattr(sys, 'frozen', False)} "
                 f"python={sys.version.split()[0]} ===")
     _ensure_single_instance()
     try:
@@ -718,6 +719,7 @@ if __name__ == "__main__":
         _log_dir.mkdir(parents=True, exist_ok=True)
         log_path = _log_dir / "BiliYTPlayer_error.log"
         with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"BiliYTPlayer v{version.VERSION}\n")
             traceback.print_exc(file=f)
         try:
             import tkinter.messagebox as mb
