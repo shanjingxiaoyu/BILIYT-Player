@@ -18,9 +18,10 @@
 | `forwarder_config.example.json` | 配置模板；安装时生成实际的 `forwarder_config.json` |
 
 **`biliyt-forwarder.exe` 不入库**（约 7.4MB）。获取方式：
-- 已装过配套组件：直接把本机那份 `biliyt-forwarder.exe` 复制到本目录
+- 推荐：下载 [link-v1.1.1 配套发布包](https://github.com/shanjingxiaoyu/BILIYT-Player/releases/tag/link-v1.1.1)
+  （含 exe + 油猴脚本 + 安装/卸载 bat + 说明，解压即用）
+- 已装过配套组件：把本机那份 `biliyt-forwarder.exe` 复制到本目录
 - 自行打包：`pyinstaller --onefile biliyt_forwarder.py`
-- 或等本仓库发布 `link-*` Release 资产后下载
 
 ## 安装（三步）
 
