@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         ⚡ BiliYTPlayer 一键唤起
-// @name:zh-CN   ⚡ BiliYTPlayer 一键唤起
+// @name         ⚡ BiliYTPlayer 一键 MPV 播放
+// @name:zh-CN   ⚡ BiliYTPlayer 一键 MPV 播放
 // @namespace    https://github.com/shanjingxiaoyu/BILIYT-Player
 // @version      1.1.1
 // @updateURL    https://cdn.jsdelivr.net/gh/shanjingxiaoyu/BILIYT-Player@main/extras/biliyt-link/biliyt_launcher.user.js
