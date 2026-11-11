@@ -28,5 +28,9 @@
 2. Tampermonkey 安装 `biliyt_launcher.user.js`（拖进浏览器或粘贴保存）
 3. 打开 B 站 / YouTube 视频页，点右下角 ▶ 按钮
 
-以后脚本更新由 Tampermonkey 通过 `@updateURL` 自动拉取。
+脚本带 `@updateURL`（jsDelivr CDN），**网络可达时** Tampermonkey 会自动更新；
+若该 CDN 在你所在网络不可达，升级时把本文件重新拖进 Tampermonkey 即可，
+不影响一键唤起功能。备用方案：把 `.user.js` 作为 Release 资产发布后，
+把 `@updateURL` 改成该资产地址（github.com 通道）。
+
 若你当前装的是 v1.1.0（无 `@updateURL`），**需要手动重装一次**本文件。

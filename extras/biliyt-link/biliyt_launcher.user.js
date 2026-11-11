@@ -3,8 +3,8 @@
 // @name:zh-CN   ⚡ BiliYTPlayer 一键唤起
 // @namespace    https://github.com/shanjingxiaoyu/BILIYT-Player
 // @version      1.1.1
-// @updateURL    https://raw.githubusercontent.com/shanjingxiaoyu/BILIYT-Player/main/extras/biliyt-link/biliyt_launcher.user.js
-// @downloadURL  https://raw.githubusercontent.com/shanjingxiaoyu/BILIYT-Player/main/extras/biliyt-link/biliyt_launcher.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/shanjingxiaoyu/BILIYT-Player@main/extras/biliyt-link/biliyt_launcher.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/shanjingxiaoyu/BILIYT-Player@main/extras/biliyt-link/biliyt_launcher.user.js
 // @description  在 B 站 / YouTube 视频页注入可拖动的悬浮按钮：一键复制当前链接并唤起本地 BiliYTPlayer 播放（biliyt:// 协议）。
 // @author       shanjingxiaoyu
 // @match        *://www.bilibili.com/*
