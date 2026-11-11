@@ -24,7 +24,7 @@ config/input.conf       mpv 快捷键配置（参考副本）
 3. 复制 B 站 / YouTube 视频链接到剪贴板，自动播放
 4. 按 `q` 退出，`f` 全屏，`` ` `` 查看渲染统计（mpv 默认快捷键见 `config/input.conf`）
 
-可选：浏览器安装 `bili_onekey_mpv.user.js` 油猴脚本（Tampermonkey），在 B 站视频页点"⚡ MPV 播放"按钮或按 `Alt+P`，一键复制链接并唤起本地播放。
+可选（一键唤起）：安装 [`extras/biliyt-link/`](extras/biliyt-link/) 配套组件——网页端装油猴脚本、本机装 `biliyt://` 转发器，在 B 站 / YouTube 视频页点一下 ▶ 按钮就直接唤起播放，不用手动复制网址。三步安装见该目录 README。旧版「仅复制链接」的脚本已移除。
 
 ### 从源码运行
 

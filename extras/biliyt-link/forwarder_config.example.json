@@ -1,0 +1,5 @@
+{
+  "player_exe": "",
+  "auto_launch_if_not_running": true,
+  "launch_wait_sec": 2.0
+}
