@@ -19,14 +19,15 @@
     *   **快捷键与交互**：修改 `mpv-portable/portable_config/input.conf`。例如：自定义按键来调节亮度 (`brightness`)、音量、对比度等。
 *   **Python 的唯一职责**：如果必须在启动时动态传递参数给 mpv，只能修改 `bili_clipboard_dolby.py` 中的 `launch_player` 函数，通过 `cmd` 列表传递 CLI 参数（例如 `--brightness=15`）。命令行参数会覆盖 mpv.conf 中的同名选项。
 
-### 2.5 智能 WASAPI 音频自适应路由（音频规则）
+### 2.5 智能 WASAPI 音频自适应路由（音频规则，2026-11-15 按现状校正）
 *   **音频输出策略完全由 mpv.conf 的 profile-cond 自动管理**，Python 不做任何音频设备 / 编码格式判断。三组自动 profile（依据 `audio-codec-name` + `audio-device` 属性自动切换）：
-    *   `[Audio-BitPerfect]` — 普通音轨（FLAC/AAC/PCM/Opus/Vorbis/MP3）→ `audio-exclusive=yes`，WASAPI 独占实现 Bit-Perfect，避开 Windows 系统重采样
+    *   `[Audio-BitPerfect]` — **仅无损音轨**（`flac` / `pcm` / `alac`，含 B 站 Hi-Res）→ `audio-exclusive=yes`，WASAPI 独占实现 Bit-Perfect，避开 Windows 系统重采样。有损编码（AAC/MP3/Opus 等）**不进独占**、走共享模式：2026-10-22 实测独占 + seek 会让设备延迟失控（单场 3793 条 Under-run），而有损流独占没有音质收益。
     *   `[Audio-Passthrough]` — 杜比/DTS 音轨（AC3/EAC3/DTS/TrueHD/MLP）＋ HDMI/SPDIF 功放/回音壁设备 → `audio-exclusive=yes` + `audio-spdif=ac3,eac3,dts,dts-hd,truehd` 源码透传
     *   `[Audio-DolbyAccess]` — 杜比/DTS 音轨 ＋ 普通耳机/板载声卡 → `audio-exclusive=no` + `audio-spdif=no`，交给 Windows Dolby Access 渲染空间音效
+*   **全局 `wasapi-exclusive-buffer=50000`（50ms，必须写在第一个 `[profile]` 段头之前）**：2026-11-10 修 B 站 Hi-Res 播放卡顿。独占默认取驱动的 10ms 设备周期，音频线程唤醒过频、易 Under-run（真实日志 134 条/场）；加深到 50ms 后唤醒频率降到 1/5，欠载归零。曾短暂改成「网络流走共享」，用户明确要求保住 Bit-Perfect，**已撤回，勿再改回共享**。
 *   **设备识别关键词**：`Display Audio` / `HDMI` / `S/PDIF` / `Digital` / `AVR` / `Soundbar` / `Receiver`（可自行增删；`audio-device` 在 Windows 下形如 `wasapi/{GUID} (设备名)`）
-*   **⚠️ Lua 语法陷阱（已踩坑，禁止再犯）**：Lua 的 `string.match` **不支持 `|` 交替语法**（`|` 只是普通字符），写 `"flac|aac|pcm"` 永远匹配不到。必须用多个 `string.match(...) ~= nil or ...` 组合。
-*   排查指引：HDMI 透传无声 → 检查功放解码能力是否支持对应格式；耳机杜比无空间感 → 确认 Dolby Access 应用已安装并启用。
+*   **⚠️ Lua 语法陷阱（已踩坑，禁止再犯）**：Lua 的 `string.match` **不支持 `|` 交替语法**（`|` 只是普通字符），写 `"flac|aac|pcm"` 永远匹配不到。必须用多个 `string.match(...) ~= nil or ...` 组合；且 `and` 优先级高于 `or`，整串 `or` 必须加括号。
+*   排查指引：HDMI 透传无声 → 检查功放解码能力是否支持对应格式；耳机杜比无空间感 → 确认 Dolby Access 应用已安装并启用；Hi-Res 卡顿 → 先确认 `wasapi-exclusive-buffer` 仍为 50000、仍是 `(exclusive)`、日志无 `Under-run`。
 
 ## 3. 网络请求与并发原则
 *   **剪贴板监听线程必须非阻塞**：监听线程只做剪贴板读取 + 正则匹配，检测到新链接入队 (`queue.Queue`)，不做任何网络请求。网络请求由独立的 Worker 线程消费。
@@ -35,7 +36,7 @@
 *   **tkinter 线程安全**：所有后台线程的 UI 更新必须通过 `root.after(0, callback)` 调度到主线程，禁止直接操作控件。
 
 ## 4. 动态多屏 HDR/SDR 映射指南
-在 `mpv.conf` 中配置色调映射时，可利用 `profile-cond` 实现基于视频源的自动切换。以下为标准范式参考：
+在 `mpv.conf` 中配置色调映射时，可利用 `profile-cond` 实现基于视频源的自动切换。以下为**通用范式参考，不是本项目当前配置**：当前 `config/mpv.conf` 只有 `[HDR10]` / `[HLG]` 两个视频源 profile（只切 `tone-mapping` 算法），**没有 `[SDR]` profile**；全局 `target-colorspace-hint=yes` + `target-peak=auto`，所以 SDR 源也会以 HDR10 容器输出（无损重编码，不是内容升级）。亮度分档表仍可用于手动覆盖 `target-peak` 时参考。
 
 ```ini
 # 基础渲染设置（全局）
@@ -100,4 +101,5 @@ target-peak=200
 ## 5. 打包与分发
 * 使用 PyInstaller 打包，spec 文件为 `bili_yt_player.spec`，输出 `BiliYTPlayer.exe`。
 * `mpv-portable/` 目录必须与 `BiliYTPlayer.exe` 同级放置，代码通过 `_exe_dir / "mpv-portable"` 定位。
-* 打包命令：`.venv/Scripts/python.exe -m PyInstaller --noconfirm bili_yt_player.spec`
+* 打包命令：`legacy/.venv-tk/Scripts/python.exe -m PyInstaller --noconfirm bili_yt_player.spec`
+  （**必须用系统版 Python 建的 `.venv-tk`**，它自带 tkinter；用托管版 Python 建的虚拟环境没有 tkinter，打包不报错但 exe 双击即崩。旧文档里的 `.venv/Scripts/python.exe` 已作废。）

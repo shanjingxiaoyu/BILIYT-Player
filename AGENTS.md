@@ -42,12 +42,12 @@ Python（`bili_yt_player.pyw` GUI + 剪贴板监听；`bili_clipboard_dolby.py` 
 - `git push` 走代理常不通；云端同步用 GitHub Git Data API
   （blob → tree → commit → PATCH ref），并用云端 tree 与本地 HEAD 比对校验。
 
-## 别照抄旧文档
+## 配置以谁为准
 
-`.cursorrules` 第 2.5 节写「`[Audio-BitPerfect]` 覆盖 FLAC/AAC/PCM/Opus/Vorbis/MP3」
-**已过时**：10/22 起只认无损 `flac/pcm/alac`；11/10 起用全局
-`wasapi-exclusive-buffer=50000` 保留独占、加深缓冲解决 Hi-Res 卡顿。
-一律以 `config/mpv.conf` 现状为准。
+`config/mpv.conf` 是**唯一事实来源**，`.cursorrules` 与本文档只是解释层。
+2026-11-15 已把 `.cursorrules` 的三处过时描述校正：第 2.5 节（BitPerfect 只认无损）、
+第 4 节（`[SDR]` profile 只是通用范式、本项目并未启用）、第 5 节（打包用 `.venv-tk`）。
+今后若再出现分歧，以 `mpv.conf` 为准，并顺手把文档改回来——别让 AI 按旧描述改配置。
 
 ## 细节去哪看
 
