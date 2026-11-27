@@ -224,10 +224,8 @@ class App:
             self._log("[+] 重新登录成功，B 站鉴权已切换。")
             # 同步切集上下文：否则换账号后 Ctrl+←→/自动连播仍用旧 session 调 API
             try:
-                from bili_clipboard_dolby import _EPISODE_STATE
-                ctx = _EPISODE_STATE.get("ctx")
-                if ctx:
-                    ctx.update(self._episode_ctx())  # 保留 pgc 等既有字段
+                from bili_clipboard_dolby import update_episode_ctx
+                update_episode_ctx(self._episode_ctx())  # 加锁原地更新，保留 pgc 等既有字段
             except Exception:
                 pass
             # 启动时若因网络异常没进入监听态，借此恢复
@@ -572,20 +570,16 @@ class App:
         """公共播放链路：取流 → 选流 → 记历史 → 唤起 mpv。
 
         pgc=True（番剧 ep/ss/md）走 PGC 专用 API——视频 API 对番剧返回 -404。
+        普通 BV 与番剧统一复用 pick_streams_from_result，兼容 DASH 与渐进式 durl 兜底。
         """
         from bili_clipboard_dolby import (get_playurl, get_playurl_pgc,
-                                          pick_dolby_streams,
                                           pick_streams_from_result, launch_player)
-        if pgc:
-            result = get_playurl_pgc(self.session, bvid, cid)
-            vurl, aurl, vd, ad = pick_streams_from_result(result)
-        else:
-            data = get_playurl(self.session, bvid, cid, self.img_key, self.sub_key)
-            dash = data.get("dash")
-            if not dash:
-                self._log("  [!] 无 DASH 数据")
-                return
-            vurl, aurl, vd, ad = pick_dolby_streams(dash)
+        result = (get_playurl_pgc(self.session, bvid, cid) if pgc
+                  else get_playurl(self.session, bvid, cid, self.img_key, self.sub_key))
+        vurl, aurl, vd, ad = pick_streams_from_result(result)
+        if not vurl:
+            self._log("  [!] 未提取到可播放的视频流地址")
+            return
         self._add_history(platform, vid_label, title, vd, ad or "普通音频")
         launch_player(self.player_path, vurl, title, audio_url=aurl,
                       sessdata=self.sessdata, log=self._log)
@@ -598,7 +592,11 @@ class App:
         """
         from bili_clipboard_dolby import (
             get_cid_and_title, resolve_episode, resolve_ss, resolve_md,
+            clear_episode_state,
         )
+        # 先清掉上一部视频的剧集上下文：md 分支 / 剧集列表获取失败时不会再设新状态，
+        # 不清的话播完会自动连播到上一部视频的下一集（2026-11-26 审查 P0-1）。
+        clear_episode_state()
         if kind == "bili":
             cid, title = get_cid_and_title(self.session, raw_id, p=p)
             bvid, label, platform, eptype = raw_id, f"{raw_id}_p{p}", "B站", ("bili", raw_id)
@@ -621,7 +619,10 @@ class App:
         self._play_dash(platform, label, bvid, cid, title, pgc=(kind != "bili"))
 
     def _play_yt(self, ytid):
-        from bili_clipboard_dolby import launch_player
+        from bili_clipboard_dolby import launch_player, clear_episode_state
+        # YouTube 没有剧集概念：必须清掉上一部 B 站视频的剧集上下文，
+        # 否则 YouTube 播完 / 按 Ctrl+→ 会跳到上一部 B 站视频的下一集（P0-1）。
+        clear_episode_state()
         url = f"https://www.youtube.com/watch?v={ytid}"
         self._log(f"    唤起播放器: {url[:60]}...")
         try:

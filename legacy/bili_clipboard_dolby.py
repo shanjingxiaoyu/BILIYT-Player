@@ -22,6 +22,7 @@ import hashlib
 import threading
 import subprocess
 import urllib.parse
+from collections import deque
 from functools import reduce
 from pathlib import Path
 from shutil import which
@@ -98,6 +99,7 @@ if not getattr(sys, "frozen", False):
 
 
 import requests  # noqa: E402
+import app_log  # noqa: E402  本地开发日志开关（打包 exe 自动静默）
 
 
 # ============================================================================
@@ -688,7 +690,7 @@ def get_playurl(session: requests.Session, bvid: str, cid: int,
         raise RuntimeError(f"playurl 失败: {j.get('message')} (code={j.get('code')})")
     data = j.get("data")
     if not data:
-        raise RuntimeError("playurl data 为空，该视频不支持杜比品质或需大会员")
+        raise RuntimeError("playurl data 为空，该视频可能需大会员或受地区/版权限制")
     return data
 
 
@@ -785,7 +787,13 @@ _EPISODE_STATE = {
     "episodes": [],   # [{bvid, cid, title}, ...] 按播放顺序
     "index": -1,      # 当前播放索引
     "ctx": None,      # dict(session, img_key, sub_key, sessdata)
+    "gen": 0,         # 代次号：每次设置/清空剧集 +1，切集中途发现变了就作废
 }
+# _STATE_LOCK：短锁，只保护状态读写，持锁期间绝不做网络请求。
+# _SWITCH_LOCK：切集互斥，非阻塞获取——已有切集在进行时，新请求直接忽略，
+#               避免自动连播与 Ctrl+←/→ 撞车导致连跳两集。
+_STATE_LOCK = threading.Lock()
+_SWITCH_LOCK = threading.Lock()
 _IPC_THREAD = None   # 后台 IPC 监听线程（end-file 事件）
 _SIGNAL_THREAD = None  # 后台信号文件轮询线程（Lua 切集键）
 
@@ -915,9 +923,32 @@ def fetch_episode_list(session, source_type: str, source_id) -> list[dict]:
 
 def set_episode_state(episodes: list, index: int, ctx: dict):
     """记录当前剧集列表与播放上下文（IPC 切集线程消费）。"""
-    _EPISODE_STATE["episodes"] = episodes or []
-    _EPISODE_STATE["index"] = index if 0 <= index < len(episodes or []) else 0
-    _EPISODE_STATE["ctx"] = ctx
+    with _STATE_LOCK:
+        _EPISODE_STATE["episodes"] = episodes or []
+        _EPISODE_STATE["index"] = index if 0 <= index < len(episodes or []) else 0
+        _EPISODE_STATE["ctx"] = ctx
+        _EPISODE_STATE["gen"] += 1
+
+
+def clear_episode_state():
+    """清空剧集上下文（播 YouTube / 无剧集信息的页面前必须调用）。
+
+    否则上一部 B 站视频的剧集列表还留着：新视频 EOF 或按 Ctrl+→ 时，
+    会把"上一部视频的下一集"加载进来。gen+1 同时让正在途中的切集作废。
+    """
+    with _STATE_LOCK:
+        _EPISODE_STATE["episodes"] = []
+        _EPISODE_STATE["index"] = -1
+        _EPISODE_STATE["ctx"] = None
+        _EPISODE_STATE["gen"] += 1
+
+
+def update_episode_ctx(fields: dict):
+    """线程安全地更新切集上下文（重新登录后同步新 session）；无上下文则忽略。"""
+    with _STATE_LOCK:
+        ctx = _EPISODE_STATE.get("ctx")
+        if ctx:
+            ctx.update(fields)
 
 
 # ---- MPV IPC 客户端（Windows 命名管道 JSON-RPC，ctypes 零依赖）----
@@ -937,7 +968,8 @@ def _ipc_send_cmd(cmd) -> bool:
         return False
 
 
-def _ipc_loadfile(video_url: str, audio_url: str | None, title: str) -> bool:
+def _ipc_loadfile(video_url: str, audio_url: str | None, title: str,
+                  gen: int | None = None) -> bool:
     """通过 IPC 无缝切流并挂载音频轨。
 
     实测结论（mpv 0.41 / win32 IPC）：
@@ -948,11 +980,15 @@ def _ipc_loadfile(video_url: str, audio_url: str | None, title: str) -> bool:
     """
     safe_title = (title or "").replace(",", "，")  # 逗号仅作显示安全
     _ipc_send_cmd(["set_property", "force-media-title", safe_title])
-    _ipc_send_cmd(["loadfile", video_url, "replace"])
+    if not _ipc_send_cmd(["loadfile", video_url, "replace"]):
+        return False  # 管道不通：如实返回，调用方不得推进集数
     if audio_url:
         # 实测：loadfile 未完成时 audio-add 会被丢弃，必须等文件加载完成再挂音轨；
         # select flag 强制选中该音轨（auto 不会 selected，可能导致哑剧）
         time.sleep(1.0)
+        # 这 1 秒内用户若复制了新链接（gen 变了），不能把旧音轨挂到新视频上
+        if gen is not None and _EPISODE_STATE["gen"] != gen:
+            return True
         _ipc_send_cmd(["audio-add", audio_url, "select"])
     # 切集后自动续播依赖 mpv.conf 的 keep-open-pause=no（EOF 只冻帧不暂停，
     # 暂停态不会被 loadfile 的新文件继承）。不要在这里补 set pause no——
@@ -1008,48 +1044,65 @@ def pick_streams_from_result(result: dict):
 
 
 def _switch_episode(direction: int):
-    """切到下一集(+1)/上一集(-1)。越界时保持原位。"""
-    st = _EPISODE_STATE
-    eps = st.get("episodes") or []
-    idx = st.get("index", -1)
-    if not eps or idx < 0:
-        print("[*] 无剧集上下文，跳过切集。", flush=True)
-        return
+    """切到下一集(+1)/上一集(-1)。越界时保持原位。
 
-    target = idx + direction
-    if target < 0 or target >= len(eps):
-        edge = "开头" if direction < 0 else "末尾"
-        print(f"[*] 已到{edge}，不切换。", flush=True)
+    并发约束：自动连播（IPC 线程）与 Ctrl+←/→（信号线程）会同时调用本函数，
+    用非阻塞互斥锁保证同一时刻只有一次切集在跑，其余直接忽略。
+    取流等慢操作不持 _STATE_LOCK；起播前后用代次号 gen 核对——
+    切集途中用户复制了新链接（gen 变了），本次切集作废，不污染新播放。
+    """
+    if not _SWITCH_LOCK.acquire(blocking=False):
+        print("[*] 切集进行中，忽略本次请求。", flush=True)
         return
-
-    ep = eps[target]
-    ctx = st.get("ctx") or {}
     try:
-        if ctx.get("pgc"):
-            # 番剧：PGC API（免费账号渐进式 durl，大会员 DASH）
-            result = get_playurl_pgc(ctx["session"], ep["bvid"], ep["cid"])
-            vurl, aurl, vd, ad = pick_streams_from_result(result)
-        else:
-            data = get_playurl(ctx["session"], ep["bvid"], ep["cid"],
-                               ctx["img_key"], ctx["sub_key"])
-            dash = data.get("dash")
-            if not dash:
-                print("[!] 该集无 DASH 数据，跳过。", flush=True)
+        with _STATE_LOCK:
+            eps = list(_EPISODE_STATE.get("episodes") or [])
+            idx = _EPISODE_STATE.get("index", -1)
+            ctx = dict(_EPISODE_STATE.get("ctx") or {})
+            gen = _EPISODE_STATE["gen"]
+        if not eps or idx < 0:
+            print("[*] 无剧集上下文，跳过切集。", flush=True)
+            return
+
+        target = idx + direction
+        if target < 0 or target >= len(eps):
+            edge = "开头" if direction < 0 else "末尾"
+            print(f"[*] 已到{edge}，不切换。", flush=True)
+            return
+
+        ep = eps[target]
+        try:
+            if ctx.get("pgc"):
+                # 番剧：PGC API（免费账号渐进式 durl，大会员 DASH）
+                result = get_playurl_pgc(ctx["session"], ep["bvid"], ep["cid"])
+                vurl, aurl, vd, ad = pick_streams_from_result(result)
+            else:
+                data = get_playurl(ctx["session"], ep["bvid"], ep["cid"],
+                                   ctx["img_key"], ctx["sub_key"])
+                vurl, aurl, vd, ad = pick_streams_from_result(data)
+            if not vurl:
+                print("[!] 该集无可播放视频流。", flush=True)
                 return
-            vurl, aurl, vd, ad = pick_dolby_streams(dash)
-        if not vurl:
-            print("[!] 该集无可播放视频流。", flush=True)
-            return
 
-        if not _ipc_loadfile(vurl, aurl, ep["title"]):
-            print("[!] MPV IPC 连接失败，切集未生效。", flush=True)
-            return
+            with _STATE_LOCK:
+                stale = _EPISODE_STATE["gen"] != gen
+            if stale:
+                print("[*] 切集途中已切换到新内容，放弃本次切集。", flush=True)
+                return
 
-        st["index"] = target
-        print(f"[+] 已切{'下一' if direction > 0 else '上一'}集: "
-              f"{ep['title']} ({vd})", flush=True)
-    except Exception as e:
-        print(f"[!] 切集失败: {e}", flush=True)
+            if not _ipc_loadfile(vurl, aurl, ep["title"], gen=gen):
+                print("[!] MPV IPC 连接失败，切集未生效。", flush=True)
+                return
+
+            with _STATE_LOCK:
+                if _EPISODE_STATE["gen"] == gen:
+                    _EPISODE_STATE["index"] = target
+            print(f"[+] 已切{'下一' if direction > 0 else '上一'}集: "
+                  f"{ep['title']} ({vd})", flush=True)
+        except Exception as e:
+            print(f"[!] 切集失败: {e}", flush=True)
+    finally:
+        _SWITCH_LOCK.release()
 
 
 def _handle_mpv_event(ev: dict):
@@ -1236,6 +1289,10 @@ def _quit_previous_mpv(timeout: float = 4.0) -> bool:
     鼠标交互会静默失效——调用方必须据此告知用户，而不是无声继续。
     """
     global _MPV_PROC
+    # 先摘除 _MPV_PROC 引用：本函数主动清退（含强杀）导致的非 0 退出，
+    # 不应被后台输出监控线程误报为"mpv 加载失败退出"。
+    proc = _MPV_PROC
+    _MPV_PROC = None
     released = True
     # 管道被占 = 有旧 mpv（含孤儿）在运行
     probe = _pipe_open(timeout_ms=200)
@@ -1260,7 +1317,6 @@ def _quit_previous_mpv(timeout: float = 4.0) -> bool:
                     pass
             released = _wait_pipe_gone(2.0)
     # 跟踪到的进程仍存活 → 强杀兜底
-    proc = _MPV_PROC
     if proc is not None and proc.poll() is None:
         try:
             proc.terminate()
@@ -1271,7 +1327,6 @@ def _quit_previous_mpv(timeout: float = 4.0) -> bool:
             except Exception:
                 pass
         released = _wait_pipe_gone(1.0) or released
-    _MPV_PROC = None
     return released
 
 
@@ -1406,7 +1461,8 @@ def _resolve_proxy_url(emit=None) -> tuple[str | None, str | None]:
 # 换 player_client=android 拿到的地址不受此限制（代价：最高 360p muxed）。
 # 本函数播放前探测一次（每会话缓存），决定 ytdl_hook 用哪个 client。
 
-_YT_THROTTLED: bool | None = None
+_YT_THROTTLED: tuple[bool, float, tuple] | None = None  # (结果, 时间戳, 代理组合)
+_YT_THROTTLE_TTL = 30 * 60  # 缓存有效期（秒）
 
 
 def _probe_url_range(url: str, start: int, end: int, proxy: str,
@@ -1415,12 +1471,20 @@ def _probe_url_range(url: str, start: int, end: int, proxy: str,
     import http.client
     try:
         parsed = urllib.parse.urlparse(url)
-        p = urllib.parse.urlparse(proxy)
-        conn = http.client.HTTPSConnection(
-            p.hostname, p.port or 80, timeout=15
-        )
-        try:
+        if proxy:
+            p = urllib.parse.urlparse(proxy)
+            conn = http.client.HTTPSConnection(
+                p.hostname, p.port or 80, timeout=15
+            )
             conn.set_tunnel(parsed.hostname, parsed.port or 443)
+        else:
+            # 无代理（直连 / TUN / 全局 VPN）：直接连目标。
+            # 原来空代理时 urlparse("").hostname 为 None → TypeError → 返回 0 →
+            # 被误判"限流"，整个会话被降到 360p（2026-11-26 审查 P0-2）。
+            conn = http.client.HTTPSConnection(
+                parsed.hostname, parsed.port or 443, timeout=15
+            )
+        try:
             hdrs = dict(headers or {})
             hdrs["Range"] = f"bytes={start}-{end}"
             hdrs.setdefault("Accept", "*/*")
@@ -1435,37 +1499,58 @@ def _probe_url_range(url: str, start: int, end: int, proxy: str,
         return 0
 
 
-def _yt_is_throttled(ytdlp_exe: str, page_url: str, proxy: str,
-                     log=None) -> bool:
-    """解析一次视频，抽中段范围探测 CDN 是否限流。异常时按不限流处理。"""
+def _yt_is_throttled(ytdlp_exe: str, page_url: str, ytdlp_proxy: str,
+                     probe_proxy: str = "", log=None) -> bool:
+    """解析一次视频，抽中段范围探测 CDN 是否限流。异常/探测失败一律按不限流处理。
+
+    ytdlp_proxy：yt-dlp 解析用的代理；probe_proxy：探测 CDN 用的代理——
+    真正拉 CDN 的是 mpv，所以调用方应传 mpv 的 HTTP 代理（socks 场景下
+    HTTP CONNECT 探测 socks 端口必然失败，不能再拿 yt-dlp 的代理探测）。
+    只有明确的 4xx（如 403）才判限流；探测本身失败（状态码 0）不缓存，
+    结果缓存 30 分钟且绑定代理组合，代理变了或过期就重新探测。
+    """
     global _YT_THROTTLED
+    key = (ytdlp_proxy or "", probe_proxy or "")
     if _YT_THROTTLED is not None:
-        return _YT_THROTTLED
+        val, ts, k = _YT_THROTTLED
+        if k == key and time.time() - ts < _YT_THROTTLE_TTL:
+            return val
+
+    def _remember(val: bool) -> bool:
+        global _YT_THROTTLED
+        _YT_THROTTLED = (val, time.time(), key)
+        return val
+
+    if log:
+        try:
+            log("    [*] 正在探测 YouTube 线路…")
+        except Exception:
+            pass
+
     try:
         cmd = [ytdlp_exe, "--no-warnings", "-J", "--no-playlist",
                "--format", "bestvideo[height<=2160]+bestaudio/best"]
-        if proxy:
-            cmd.append(f"--proxy={proxy}")
+        if ytdlp_proxy:
+            cmd.append(f"--proxy={ytdlp_proxy}")
         cmd += ["--", page_url]
-        out = _run_silent(cmd, capture_output=True, text=True, timeout=90)
+        out = _run_silent(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=90)
         if out.returncode != 0:
-            _YT_THROTTLED = False
-            return False
+            return False  # 解析失败（网络等）：不下结论，不缓存
         data = json.loads(out.stdout)
         fmts = data.get("requested_formats") or [data]
         f = next((x for x in fmts if x.get("vcodec") != "none"), None) or fmts[0]
         url = f.get("url")
         size = f.get("filesize") or f.get("filesize_approx")
         if not url or not size or size < 4 * 1024 * 1024:
-            _YT_THROTTLED = False
-            return False
+            return _remember(False)
         mid = size // 2
-        status = _probe_url_range(url, mid, mid + 1024 * 1024 - 1, proxy,
-                                  f.get("http_headers"))
-        _YT_THROTTLED = (status != 206)
-        return _YT_THROTTLED
+        status = _probe_url_range(url, mid, mid + 1024 * 1024 - 1,
+                                  probe_proxy or "", f.get("http_headers"))
+        if status == 0:
+            return False  # 探测本身失败：不当作限流，也不缓存
+        return _remember(400 <= status < 500)
     except Exception:
-        _YT_THROTTLED = False
         return False
 
 
@@ -1487,6 +1572,42 @@ def _cleanup_stale_cookie_files():
                 pass
     except Exception:
         pass
+
+
+def _drain_mpv_output(proc, tail, start_ts: float, emit,
+                      reported_evt: threading.Event):
+    """持续排空 mpv 合并输出，并在起播早期异常退出时把错误摘要回传 GUI。
+
+    实测 Windows 编译版 mpv.exe（GUI 子系统）把 [ytdl_hook] ERROR / Failed 等
+    报错写到 stdout 而非 stderr，且 ytdl_hook 往往在起播 3~8 秒后才失败退出(code=2)——
+    此时 0.3s 秒退检查早已结束，不在此处兜底就会出现"窗口闪退但状态栏还显示正在播放"。
+    """
+    try:
+        for line in proc.stdout:
+            s = line.strip()
+            if s and not s.startswith(("V:", "AV:", "A:")):
+                tail.append(s)
+    except Exception:
+        pass
+    try:
+        rc = proc.wait(timeout=2)
+    except Exception:
+        return
+    if (rc and not reported_evt.is_set()
+            and _MPV_PROC is proc and (time.time() - start_ts) < 30):
+        err_lines = [
+            x for x in tail
+            if any(k in x for k in ("ERROR", "Error", "Failed", "Cannot open"))
+        ]
+        # 已正常出画面（VO: 已初始化）且无错误行时，多为外部强关窗口，不误报加载失败
+        if not err_lines and any(x.startswith("VO:") for x in tail):
+            return
+        reported_evt.set()
+        code_str = f"0x{rc:08X}" if rc > 255 else str(rc)
+        summary = "\n        ".join((err_lines or list(tail))[-3:])
+        emit(f"    [!] mpv 加载失败退出 (code={code_str})")
+        if summary:
+            emit(f"        {summary[:400]}")
 
 
 def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, log=None):
@@ -1512,10 +1633,13 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
         video_url,
         f"--force-media-title={title}",
         f"--config-dir={portable_conf}",
-        "--log-file=" + str(_CONFIG_DIR / "mpv.log"),
         # MPV IPC：切集通道（命名管道，< / > 切集 + 播完自动下一集）
         f"--input-ipc-server={IPC_PIPE}",
     ]
+    # 硬约束 7：发布版完全静默。mpv 的 --log-file 会把完整命令行（含 Cookie 头）
+    # 一并写盘，只在开发态（app_log.enabled()）开启；BILIYTPLAYER_LOG=1 可强制开。
+    if app_log.enabled():
+        cmd.append("--log-file=" + str(_CONFIG_DIR / "mpv.log"))
 
     # 注入切集快捷键转发脚本（Lua，绑定 Ctrl+←/Ctrl+→ → 写信号文件）
     lua_script = str(_exe_dir / "bili-ipc.lua")
@@ -1559,7 +1683,9 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
         if ytdlp_proxy and ytdlp_proxy != mpv_proxy:
             _emit(f"    [→] yt-dlp 代理: {ytdlp_proxy}")
         # 限流会话探测：默认 client 的地址被 CDN 锁前 2.5MB 时换 android client
-        if _yt_is_throttled(ytdlp_exe, video_url, ytdlp_proxy or "", _emit):
+        is_yt = ("youtube.com" in video_url or "youtu.be" in video_url)
+        if is_yt and _yt_is_throttled(ytdlp_exe, video_url, ytdlp_proxy or "",
+                                      mpv_proxy or "", _emit):
             ytdl_opts += ",extractor-args=youtube:player_client=android"
             _emit("    [!] 检测到 YouTube 限流，切换 android client（最高 360p）")
         cmd += [
@@ -1583,9 +1709,22 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
     popen_kw = {}
     if sys.platform == "win32":
         popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
-    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, **popen_kw)
+    start_ts = time.time()
+    reported_evt = threading.Event()
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", **popen_kw,
+    )
     global _MPV_PROC
     _MPV_PROC = proc
+    # 合并排空 stdout+stderr：防管道缓冲写满阻塞 mpv，同时捕获 ytdl_hook 延迟报错。
+    output_tail: deque = deque(maxlen=50)
+    drain = threading.Thread(
+        target=_drain_mpv_output,
+        args=(proc, output_tail, start_ts, _emit, reported_evt),
+        daemon=True,
+    )
+    drain.start()
 
     # 启动 IPC 监听线程：支持 < / > 切集 + 播完自动下一集（幂等）
     start_ipc_monitor()
@@ -1596,10 +1735,12 @@ def launch_player(player_path, video_url, title, audio_url=None, sessdata=None, 
     time.sleep(0.3)
     code = proc.poll()
     if code is not None and code != 0:
-        err = proc.stderr.read()[:500] if proc.stderr else ""
+        reported_evt.set()
+        drain.join(timeout=0.5)  # 进程已退出，等读线程收完尾
+        err = "\n        ".join(list(output_tail)[-3:])
         _emit(f"    [!] mpv 异常退出 (code={code})。")
         if err:
-            _emit(f"    [!] {err.strip()}")
+            _emit(f"        {err[:400]}")
     elif code is None:
         # B-4（2026-10-30）：必须确认 IPC 管道真的建立，不能只看进程活着。
         # 管道没建立时画面照播，但切集/连播/鼠标交互全废，用户毫无察觉。

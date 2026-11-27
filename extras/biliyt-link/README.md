@@ -13,7 +13,7 @@
 |---|---|
 | `biliyt_launcher.user.js` | 油猴脚本（浏览器端），带 `@updateURL` 自动更新 |
 | `biliyt_forwarder.py` | 转发器源码 |
-| `register_biliyt_protocol.py` / `.reg` | 注册 / 注销 `biliyt://` 协议 |
+| `register_biliyt_protocol.py` / `.reg.example` | 注册 / 注销 `biliyt://` 协议（`.reg.example` 为手动导入参考模板） |
 | `安装.bat` / `卸载.bat` | 一键安装 / 卸载 |
 | `forwarder_config.example.json` | 配置模板；安装时生成实际的 `forwarder_config.json` |
 

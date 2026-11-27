@@ -7,6 +7,6 @@
    必须用同一个常量，否则改了标题、守卫还拿旧字符串找窗口，重复启动时
    就没法把已有实例提到前台。
 """
-VERSION = "3.2.1"
+VERSION = "3.2.2"
 APP_NAME = "剪贴板直连播放器"
 WINDOW_TITLE = f"{APP_NAME} v{VERSION} — B站 / YouTube"
